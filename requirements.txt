@@ -1,0 +1,10 @@
+pandas
+numpy
+scikit-learn
+xgboost
+joblib
+firebase-admin
+kaggle
+google-cloud-storage
+pydantic-settings
+pydantic
