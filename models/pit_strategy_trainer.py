@@ -19,7 +19,6 @@ class PitStrategyTrainer:
     # TRAINING ENTRY POINT
     # ------------------------------------------------------------
     def train(self, processed_data: dict) -> dict:
-        """Train pit strategy model using comprehensive race data"""
         features_list = []
         targets_list = []
 
@@ -31,7 +30,7 @@ class PitStrategyTrainer:
                 session_features, session_targets = self._extract_session_features(
                     {**data, 'lap_data': lap_data, 'race_data': race_data}, session_key
                 )
-                if not session_features.empty:
+                if not session_features.empty and not session_targets.empty:
                     features_list.append(session_features)
                     targets_list.append(session_targets)
 
@@ -43,7 +42,7 @@ class PitStrategyTrainer:
         y = pd.concat(targets_list, ignore_index=True)
 
         # Encode target variable
-        y_encoded = self.label_encoder.fit_transform(y)
+        y_encoded = self.label_encoder.fit_transform(y.astype(str))
 
         # Drop rows with NaNs
         valid_mask = ~X.isna().any(axis=1)
@@ -79,7 +78,6 @@ class PitStrategyTrainer:
     # SESSION FEATURE EXTRACTION
     # ------------------------------------------------------------
     def _extract_session_features(self, data: dict, session_key: str) -> tuple:
-        """Extract realistic pit strategy features from session data"""
         race_data = self._normalize_race_data(data.get('race_data', pd.DataFrame()))
         lap_data = self._normalize_lap_data(data.get('lap_data', pd.DataFrame()))
         telemetry_data = data.get('telemetry_data', pd.DataFrame())
@@ -88,16 +86,22 @@ class PitStrategyTrainer:
         features = []
         targets = []
 
+        if race_data.empty or lap_data.empty:
+            return pd.DataFrame(), pd.Series(dtype=object)
+
         for _, car_result in race_data.iterrows():
             car_number = car_result.get('NUMBER')
             if pd.isna(car_number):
                 continue
 
             car_laps = lap_data[lap_data['NUMBER'] == car_number].sort_values('LAP_NUMBER')
-            if len(car_laps) < 3:
+            if car_laps.empty or len(car_laps) < 3:
                 continue
 
+            # Safely detect pit lap
             actual_pit_lap = self._detect_actual_pit_stop(car_laps, telemetry_data)
+
+            # Compute metrics with safe defaults
             performance_features = self._calculate_performance_metrics(car_result, car_laps, telemetry_data)
             condition_features = self._extract_condition_features(weather_data, session_key)
             context_features = self._extract_competitive_context(car_result, race_data)
@@ -108,37 +112,29 @@ class PitStrategyTrainer:
             features.append(pd.DataFrame([feature_vector]))
             targets.append(pd.Series([optimal_strategy]))
 
-        if features:
+        if features and targets:
             return pd.concat(features, ignore_index=True), pd.concat(targets, ignore_index=True)
         return pd.DataFrame(), pd.Series(dtype=object)
 
     # ------------------------------------------------------------
-    # LAP DATA NORMALIZATION
+    # DATA NORMALIZATION
     # ------------------------------------------------------------
     def _normalize_lap_data(self, lap_data: pd.DataFrame) -> pd.DataFrame:
-        """Ensure lap_data has NUMBER and LAP_NUMBER columns"""
         if lap_data.empty:
             return lap_data.copy()
 
         df = lap_data.copy()
-
         if 'NUMBER' not in df.columns:
-            df['NUMBER'] = df.index  # fallback to row index
-
+            df['NUMBER'] = df.index
         if 'LAP_NUMBER' not in df.columns:
             df['LAP_NUMBER'] = df.groupby('NUMBER').cumcount() + 1
 
-        # Ensure numeric types to avoid MKL DGELSD errors
         for col in df.select_dtypes(include=['object']).columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
         return df
 
-    # ------------------------------------------------------------
-    # RACE DATA NORMALIZATION
-    # ------------------------------------------------------------
     def _normalize_race_data(self, race_data: pd.DataFrame) -> pd.DataFrame:
-        """Ensure race_data has NUMBER column"""
         if race_data.empty:
             return race_data.copy()
         df = race_data.copy()
@@ -150,10 +146,12 @@ class PitStrategyTrainer:
     # PIT DETECTION & PERFORMANCE METRICS
     # ------------------------------------------------------------
     def _detect_actual_pit_stop(self, car_laps: pd.DataFrame, telemetry_data: pd.DataFrame) -> int:
-        if len(car_laps) < 3:
+        if car_laps.empty:
             return -1
-        lap_times = car_laps['LAP_TIME_SECONDS'].values
-        lap_numbers = car_laps['LAP_NUMBER'].values
+        lap_times = car_laps.get('LAP_TIME_SECONDS', pd.Series([0])).values
+        lap_numbers = car_laps.get('LAP_NUMBER', pd.Series(range(1, len(car_laps)+1))).values
+        if len(lap_times) < 3:
+            return -1
         median_lap_time = np.median(lap_times)
         pit_threshold = median_lap_time * 1.8
         potential_pit_laps = lap_numbers[lap_times > pit_threshold]
@@ -162,30 +160,19 @@ class PitStrategyTrainer:
     def _calculate_performance_metrics(self, car_result: pd.Series, car_laps: pd.DataFrame,
                                        telemetry_data: pd.DataFrame) -> dict:
         metrics = {}
-        # Tire degradation
-        if len(car_laps) > 15:
-            stable_laps = car_laps[car_laps['LAP_NUMBER'].between(5, 15)]
-            if len(stable_laps) > 5:
-                try:
-                    slope = np.polyfit(stable_laps['LAP_NUMBER'], stable_laps['LAP_TIME_SECONDS'], 1)[0]
-                    metrics['tire_degradation_rate'] = max(0.01, min(0.5, slope))
-                except:
-                    metrics['tire_degradation_rate'] = 0.1
-            else:
-                metrics['tire_degradation_rate'] = 0.1
-        else:
+        if 'LAP_TIME_SECONDS' not in car_laps.columns or car_laps.empty:
             metrics['tire_degradation_rate'] = 0.1
-
-        # Fuel effect
-        if len(car_laps) > 10:
-            early = car_laps['LAP_TIME_SECONDS'].between(2, 4).mean()
-            mid = car_laps['LAP_TIME_SECONDS'].between(8, 12).mean()
-            metrics['fuel_effect'] = 0.8 if pd.isna(early) or pd.isna(mid) else max(0.1, min(2.0, early - mid))
+            metrics['consistency'] = 0.0
+            metrics['best_lap_number'] = -1
         else:
-            metrics['fuel_effect'] = 0.8
-
-        metrics['consistency'] = 1.0 / (1.0 + car_laps['LAP_TIME_SECONDS'].std())
-        metrics['best_lap_number'] = car_laps['LAP_NUMBER'].iloc[car_laps['LAP_TIME_SECONDS'].idxmin()]
+            lap_times = pd.to_numeric(car_laps['LAP_TIME_SECONDS'], errors='coerce').fillna(0)
+            lap_numbers = pd.to_numeric(car_laps['LAP_NUMBER'], errors='coerce').fillna(0)
+            metrics['tire_degradation_rate'] = np.polyfit(lap_numbers, lap_times, 1)[0] if len(lap_numbers) > 5 else 0.1
+            metrics['consistency'] = 1.0 / (1.0 + lap_times.std()) if lap_times.std() > 0 else 0.0
+            if lap_times.size > 0:
+                metrics['best_lap_number'] = int(lap_numbers[lap_times.idxmin()])
+            else:
+                metrics['best_lap_number'] = -1
 
         # Sector degradation
         for sector in ['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS']:
@@ -194,14 +181,13 @@ class PitStrategyTrainer:
         return metrics
 
     def _calculate_sector_degradation(self, car_laps: pd.DataFrame, sector_col: str) -> float:
-        if sector_col not in car_laps.columns or len(car_laps) < 8:
+        if sector_col not in car_laps.columns or len(car_laps) < 3:
             return 0.1
-        valid = car_laps[car_laps[sector_col] > 0]
-        mid_laps = valid[valid['LAP_NUMBER'].between(5, 15)]
-        if len(mid_laps) < 3:
+        valid = car_laps[car_laps[sector_col] > 0] if sector_col in car_laps.columns else pd.DataFrame()
+        if valid.empty or len(valid) < 3:
             return 0.1
         try:
-            slope = np.polyfit(mid_laps['LAP_NUMBER'], mid_laps[sector_col], 1)[0]
+            slope = np.polyfit(valid['LAP_NUMBER'], valid[sector_col], 1)[0]
             return max(0.001, min(0.2, slope))
         except:
             return 0.1
@@ -224,10 +210,10 @@ class PitStrategyTrainer:
 
     def _extract_competitive_context(self, car_result: pd.Series, race_data: pd.DataFrame) -> dict:
         pos = car_result.get('POSITION', 1)
-        total_cars = len(race_data)
+        total_cars = len(race_data) if not race_data.empty else 1
         return {
             'position': pos,
-            'position_normalized': pos / total_cars if total_cars else 1,
+            'position_normalized': pos / total_cars,
             'total_cars': total_cars,
             'gap_to_leader': self._parse_gap(car_result.get('GAP_FIRST', '0')),
             'gap_to_next': self._parse_gap(car_result.get('GAP_PREVIOUS', '0')),
@@ -244,12 +230,10 @@ class PitStrategyTrainer:
             'vir': {'abrasiveness': 0.7, 'length': 5.3},
             'sebring': {'abrasiveness': 0.9, 'length': 6.0}
         }
-        t = track_map.get(track_name.lower(), {'abrasiveness': 0.7, 'length': 5.0})
+        t = track_map.get(str(track_name).lower(), {'abrasiveness': 0.7, 'length': 5.0})
         return t.get(characteristic, 0.7)
 
     def _parse_gap(self, gap_str: str) -> float:
-        if pd.isna(gap_str) or gap_str in ['-', '']:
-            return 0.0
         try:
             return float(str(gap_str).replace('+', '').strip())
         except:
@@ -260,19 +244,19 @@ class PitStrategyTrainer:
     # ------------------------------------------------------------
     def _determine_optimal_strategy(self, car_result: pd.Series, car_laps: pd.DataFrame,
                                     actual_pit_lap: int, features: dict) -> str:
-        score = 0
-        degradation = features.get('tire_degradation_rate', 0.1)
-        position = car_result.get('POSITION', 1)
+        deg = features.get('tire_degradation_rate', 0.1)
+        pos = car_result.get('POSITION', 1)
         gap_to_leader = features.get('gap_to_leader', 0)
 
-        if degradation > 0.2:
+        score = 0
+        if deg > 0.2:
             score += 2
-        elif degradation > 0.1:
+        elif deg > 0.1:
             score += 1
 
-        if position == 1:
+        if pos == 1:
             score -= 1
-        elif position >= 10:
+        elif pos >= 10:
             score += 1
 
         if gap_to_leader > 30:
@@ -318,6 +302,349 @@ class PitStrategyTrainer:
         self.scaler = data['scaler']
         self.label_encoder = data['label_encoder']
         self.feature_columns = data['feature_columns']
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# import pandas as pd
+# import numpy as np
+# from sklearn.ensemble import RandomForestClassifier
+# from sklearn.model_selection import train_test_split
+# from sklearn.preprocessing import StandardScaler, LabelEncoder
+# import joblib
+
+
+# class PitStrategyTrainer:
+#     def __init__(self):
+#         self.model = RandomForestClassifier(
+#             n_estimators=100, random_state=42, n_jobs=-1
+#         )
+#         self.scaler = StandardScaler()
+#         self.label_encoder = LabelEncoder()
+#         self.feature_columns = []
+
+#     # ------------------------------------------------------------
+#     # TRAINING ENTRY POINT
+#     # ------------------------------------------------------------
+#     def train(self, processed_data: dict) -> dict:
+#         """Train pit strategy model using comprehensive race data"""
+#         features_list = []
+#         targets_list = []
+
+#         for session_key, data in processed_data.items():
+#             lap_data = self._normalize_lap_data(data.get('lap_data', pd.DataFrame()))
+#             race_data = self._normalize_race_data(data.get('race_data', pd.DataFrame()))
+
+#             if not race_data.empty and not lap_data.empty:
+#                 session_features, session_targets = self._extract_session_features(
+#                     {**data, 'lap_data': lap_data, 'race_data': race_data}, session_key
+#                 )
+#                 if not session_features.empty:
+#                     features_list.append(session_features)
+#                     targets_list.append(session_targets)
+
+#         if not features_list:
+#             return {'error': 'No valid training data extracted'}
+
+#         # Combine all session data
+#         X = pd.concat(features_list, ignore_index=True)
+#         y = pd.concat(targets_list, ignore_index=True)
+
+#         # Encode target variable
+#         y_encoded = self.label_encoder.fit_transform(y)
+
+#         # Drop rows with NaNs
+#         valid_mask = ~X.isna().any(axis=1)
+#         X = X[valid_mask]
+#         y_encoded = y_encoded[valid_mask]
+
+#         if len(X) < 20:
+#             return {'error': f'Insufficient training samples: {len(X)}'}
+
+#         # Scale features
+#         X_scaled = self.scaler.fit_transform(X)
+#         self.feature_columns = X.columns.tolist()
+
+#         # Train model
+#         X_train, X_test, y_train, y_test = train_test_split(
+#             X_scaled, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
+#         )
+#         self.model.fit(X_train, y_train)
+
+#         accuracy = self.model.score(X_test, y_test)
+#         feature_importance = dict(zip(self.feature_columns, self.model.feature_importances_))
+
+#         return {
+#             'model': self,
+#             'features': self.feature_columns,
+#             'accuracy': accuracy,
+#             'feature_importance': feature_importance,
+#             'training_samples': len(X),
+#             'class_distribution': dict(zip(self.label_encoder.classes_, np.bincount(y_encoded)))
+#         }
+
+#     # ------------------------------------------------------------
+#     # SESSION FEATURE EXTRACTION
+#     # ------------------------------------------------------------
+#     def _extract_session_features(self, data: dict, session_key: str) -> tuple:
+#         """Extract realistic pit strategy features from session data"""
+#         race_data = self._normalize_race_data(data.get('race_data', pd.DataFrame()))
+#         lap_data = self._normalize_lap_data(data.get('lap_data', pd.DataFrame()))
+#         telemetry_data = data.get('telemetry_data', pd.DataFrame())
+#         weather_data = data.get('weather_data', pd.DataFrame())
+
+#         features = []
+#         targets = []
+
+#         for _, car_result in race_data.iterrows():
+#             car_number = car_result.get('NUMBER')
+#             if pd.isna(car_number):
+#                 continue
+
+#             car_laps = lap_data[lap_data['NUMBER'] == car_number].sort_values('LAP_NUMBER')
+#             if len(car_laps) < 3:
+#                 continue
+
+#             actual_pit_lap = self._detect_actual_pit_stop(car_laps, telemetry_data)
+#             performance_features = self._calculate_performance_metrics(car_result, car_laps, telemetry_data)
+#             condition_features = self._extract_condition_features(weather_data, session_key)
+#             context_features = self._extract_competitive_context(car_result, race_data)
+
+#             feature_vector = {**performance_features, **condition_features, **context_features}
+#             optimal_strategy = self._determine_optimal_strategy(car_result, car_laps, actual_pit_lap, feature_vector)
+
+#             features.append(pd.DataFrame([feature_vector]))
+#             targets.append(pd.Series([optimal_strategy]))
+
+#         if features:
+#             return pd.concat(features, ignore_index=True), pd.concat(targets, ignore_index=True)
+#         return pd.DataFrame(), pd.Series(dtype=object)
+
+#     # ------------------------------------------------------------
+#     # LAP DATA NORMALIZATION
+#     # ------------------------------------------------------------
+#     def _normalize_lap_data(self, lap_data: pd.DataFrame) -> pd.DataFrame:
+#         """Ensure lap_data has NUMBER and LAP_NUMBER columns"""
+#         if lap_data.empty:
+#             return lap_data.copy()
+
+#         df = lap_data.copy()
+
+#         if 'NUMBER' not in df.columns:
+#             df['NUMBER'] = df.index  # fallback to row index
+
+#         if 'LAP_NUMBER' not in df.columns:
+#             df['LAP_NUMBER'] = df.groupby('NUMBER').cumcount() + 1
+
+#         # Ensure numeric types to avoid MKL DGELSD errors
+#         for col in df.select_dtypes(include=['object']).columns:
+#             df[col] = pd.to_numeric(df[col], errors='coerce')
+
+#         return df
+
+#     # ------------------------------------------------------------
+#     # RACE DATA NORMALIZATION
+#     # ------------------------------------------------------------
+#     def _normalize_race_data(self, race_data: pd.DataFrame) -> pd.DataFrame:
+#         """Ensure race_data has NUMBER column"""
+#         if race_data.empty:
+#             return race_data.copy()
+#         df = race_data.copy()
+#         if 'NUMBER' not in df.columns:
+#             df['NUMBER'] = df.index
+#         return df
+
+#     # ------------------------------------------------------------
+#     # PIT DETECTION & PERFORMANCE METRICS
+#     # ------------------------------------------------------------
+#     def _detect_actual_pit_stop(self, car_laps: pd.DataFrame, telemetry_data: pd.DataFrame) -> int:
+#         if len(car_laps) < 3:
+#             return -1
+#         lap_times = car_laps['LAP_TIME_SECONDS'].values
+#         lap_numbers = car_laps['LAP_NUMBER'].values
+#         median_lap_time = np.median(lap_times)
+#         pit_threshold = median_lap_time * 1.8
+#         potential_pit_laps = lap_numbers[lap_times > pit_threshold]
+#         return int(potential_pit_laps[0]) if len(potential_pit_laps) > 0 else -1
+
+#     def _calculate_performance_metrics(self, car_result: pd.Series, car_laps: pd.DataFrame,
+#                                        telemetry_data: pd.DataFrame) -> dict:
+#         metrics = {}
+#         # Tire degradation
+#         if len(car_laps) > 15:
+#             stable_laps = car_laps[car_laps['LAP_NUMBER'].between(5, 15)]
+#             if len(stable_laps) > 5:
+#                 try:
+#                     slope = np.polyfit(stable_laps['LAP_NUMBER'], stable_laps['LAP_TIME_SECONDS'], 1)[0]
+#                     metrics['tire_degradation_rate'] = max(0.01, min(0.5, slope))
+#                 except:
+#                     metrics['tire_degradation_rate'] = 0.1
+#             else:
+#                 metrics['tire_degradation_rate'] = 0.1
+#         else:
+#             metrics['tire_degradation_rate'] = 0.1
+
+#         # Fuel effect
+#         if len(car_laps) > 10:
+#             early = car_laps['LAP_TIME_SECONDS'].between(2, 4).mean()
+#             mid = car_laps['LAP_TIME_SECONDS'].between(8, 12).mean()
+#             metrics['fuel_effect'] = 0.8 if pd.isna(early) or pd.isna(mid) else max(0.1, min(2.0, early - mid))
+#         else:
+#             metrics['fuel_effect'] = 0.8
+
+#         metrics['consistency'] = 1.0 / (1.0 + car_laps['LAP_TIME_SECONDS'].std())
+#         metrics['best_lap_number'] = car_laps['LAP_NUMBER'].iloc[car_laps['LAP_TIME_SECONDS'].idxmin()]
+
+#         # Sector degradation
+#         for sector in ['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS']:
+#             metrics[f'{sector.lower()}_degradation'] = self._calculate_sector_degradation(car_laps, sector)
+
+#         return metrics
+
+#     def _calculate_sector_degradation(self, car_laps: pd.DataFrame, sector_col: str) -> float:
+#         if sector_col not in car_laps.columns or len(car_laps) < 8:
+#             return 0.1
+#         valid = car_laps[car_laps[sector_col] > 0]
+#         mid_laps = valid[valid['LAP_NUMBER'].between(5, 15)]
+#         if len(mid_laps) < 3:
+#             return 0.1
+#         try:
+#             slope = np.polyfit(mid_laps['LAP_NUMBER'], mid_laps[sector_col], 1)[0]
+#             return max(0.001, min(0.2, slope))
+#         except:
+#             return 0.1
+
+#     # ------------------------------------------------------------
+#     # CONDITIONS & COMPETITIVE CONTEXT
+#     # ------------------------------------------------------------
+#     def _extract_condition_features(self, weather_data: pd.DataFrame, session_key: str) -> dict:
+#         if weather_data.empty:
+#             return {'avg_track_temp': 35.0, 'avg_air_temp': 25.0, 'track_temp_variance': 2.0,
+#                     'track_abrasiveness': 0.7, 'track_length_km': 5.0}
+
+#         return {
+#             'avg_track_temp': weather_data.get('TRACK_TEMP', pd.Series([35.0])).mean(),
+#             'avg_air_temp': weather_data.get('AIR_TEMP', pd.Series([25.0])).mean(),
+#             'track_temp_variance': weather_data.get('TRACK_TEMP', pd.Series([2.0])).var(),
+#             'track_abrasiveness': self._get_track_characteristic(session_key, 'abrasiveness'),
+#             'track_length_km': self._get_track_characteristic(session_key, 'length')
+#         }
+
+#     def _extract_competitive_context(self, car_result: pd.Series, race_data: pd.DataFrame) -> dict:
+#         pos = car_result.get('POSITION', 1)
+#         total_cars = len(race_data)
+#         return {
+#             'position': pos,
+#             'position_normalized': pos / total_cars if total_cars else 1,
+#             'total_cars': total_cars,
+#             'gap_to_leader': self._parse_gap(car_result.get('GAP_FIRST', '0')),
+#             'gap_to_next': self._parse_gap(car_result.get('GAP_PREVIOUS', '0')),
+#             'is_leading': 1 if pos == 1 else 0,
+#             'is_top_5': 1 if pos <= 5 else 0
+#         }
+
+#     def _get_track_characteristic(self, track_name: str, characteristic: str) -> float:
+#         track_map = {
+#             'sonoma': {'abrasiveness': 0.8, 'length': 4.0},
+#             'cota': {'abrasiveness': 0.7, 'length': 5.5},
+#             'road-america': {'abrasiveness': 0.6, 'length': 6.5},
+#             'barber': {'abrasiveness': 0.9, 'length': 3.7},
+#             'vir': {'abrasiveness': 0.7, 'length': 5.3},
+#             'sebring': {'abrasiveness': 0.9, 'length': 6.0}
+#         }
+#         t = track_map.get(track_name.lower(), {'abrasiveness': 0.7, 'length': 5.0})
+#         return t.get(characteristic, 0.7)
+
+#     def _parse_gap(self, gap_str: str) -> float:
+#         if pd.isna(gap_str) or gap_str in ['-', '']:
+#             return 0.0
+#         try:
+#             return float(str(gap_str).replace('+', '').strip())
+#         except:
+#             return 0.0
+
+#     # ------------------------------------------------------------
+#     # STRATEGY DECISION
+#     # ------------------------------------------------------------
+#     def _determine_optimal_strategy(self, car_result: pd.Series, car_laps: pd.DataFrame,
+#                                     actual_pit_lap: int, features: dict) -> str:
+#         score = 0
+#         degradation = features.get('tire_degradation_rate', 0.1)
+#         position = car_result.get('POSITION', 1)
+#         gap_to_leader = features.get('gap_to_leader', 0)
+
+#         if degradation > 0.2:
+#             score += 2
+#         elif degradation > 0.1:
+#             score += 1
+
+#         if position == 1:
+#             score -= 1
+#         elif position >= 10:
+#             score += 1
+
+#         if gap_to_leader > 30:
+#             score += 1
+#         elif gap_to_leader < 5:
+#             score -= 1
+
+#         return 'early' if score >= 2 else 'late' if score <= -1 else 'middle'
+
+#     # ------------------------------------------------------------
+#     # PREDICTION / FALLBACK
+#     # ------------------------------------------------------------
+#     def predict_optimal_strategy(self, features: dict) -> str:
+#         try:
+#             vec = np.array([features.get(c, 0) for c in self.feature_columns]).reshape(1, -1)
+#             return self.label_encoder.inverse_transform([self.model.predict(self.scaler.transform(vec))[0]])[0]
+#         except Exception:
+#             return self._fallback_strategy(features)
+
+#     def _fallback_strategy(self, features: dict) -> str:
+#         deg = features.get('tire_degradation_rate', 0.1)
+#         pos = features.get('position', 1)
+#         if deg > 0.15 or pos > 8:
+#             return 'early'
+#         elif pos == 1:
+#             return 'late'
+#         return 'middle'
+
+#     # ------------------------------------------------------------
+#     # MODEL SERIALIZATION
+#     # ------------------------------------------------------------
+#     def save_model(self, filepath: str):
+#         joblib.dump({
+#             'model': self.model,
+#             'scaler': self.scaler,
+#             'label_encoder': self.label_encoder,
+#             'feature_columns': self.feature_columns
+#         }, filepath)
+
+#     def load_model(self, filepath: str):
+#         data = joblib.load(filepath)
+#         self.model = data['model']
+#         self.scaler = data['scaler']
+#         self.label_encoder = data['label_encoder']
+#         self.feature_columns = data['feature_columns']
 
 
 
