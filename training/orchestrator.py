@@ -2,14 +2,14 @@ import os
 import logging
 import joblib
 import pandas as pd
-from typing import Dict, Any
+import numpy as np
+from typing import Dict, Any, List, Optional
 
 from models.tire_trainer import TireModelTrainer
 from models.fuel_trainer import FuelModelTrainer
 from models.pit_strategy_trainer import PitStrategyTrainer
 from models.weather_trainer import WeatherModelTrainer
 from data.preprocessor import DataPreprocessor
-from data.feature_engineer import FeatureEngineer
 
 
 class TrainingOrchestrator:
@@ -18,275 +18,587 @@ class TrainingOrchestrator:
         self.logger = logging.getLogger(__name__)
         self.models_output_dir = "outputs/models"
         self.training_state_dir = "outputs/training_state"
-        os.makedirs(self.models_output_dir, exist_ok=True)
-        os.makedirs(self.training_state_dir, exist_ok=True)
+        
+        # Create directories with error handling
+        try:
+            os.makedirs(self.models_output_dir, exist_ok=True)
+            os.makedirs(self.training_state_dir, exist_ok=True)
+        except Exception as e:
+            self.logger.error(f"❌ Failed to create output directories: {e}")
+            raise
 
     # -------------------------------
     # MAIN TRAINING PIPELINE
     # -------------------------------
     def train_all_models(self) -> dict:
-        self.logger.info("🚀 Starting robust model training pipeline...")
+        """Main training pipeline with comprehensive error handling"""
+        try:
+            self.logger.info("🚀 Starting robust model training pipeline...")
 
-        state = self._load_training_state()
-        if state.get("completed", False):
-            self.logger.info("✅ Training already completed. Loading models...")
-            return self._load_existing_models()
+            # Load training state
+            state = self._load_training_state()
+            if state.get("completed", False):
+                self.logger.info("✅ Training already completed. Loading existing models...")
+                return self._load_existing_models()
 
-        available_tracks = self.storage.list_available_tracks()
-        if not available_tracks:
-            self.logger.error("❌ No tracks available in storage")
-            return {}
+            # Get available tracks
+            available_tracks = self._get_available_tracks_with_fallback()
+            if not available_tracks:
+                self.logger.error("❌ No tracks available for training")
+                return self._generate_fallback_models()
 
+            self.logger.info(f"📁 Found {len(available_tracks)} tracks: {available_tracks}")
+
+            # Process tracks incrementally
+            processed_data = self._process_all_tracks(available_tracks, state)
+            if not processed_data:
+                self.logger.error("❌ No valid data processed from any track")
+                return self._generate_fallback_models()
+
+            # Train models with validated data
+            models = self._train_models_with_validation(processed_data, state.get("models", {}))
+            
+            # Finalize training
+            if models:
+                self._finalize_training_success(available_tracks, models)
+                self.logger.info(f"🎉 Training completed successfully! Generated {len(models)} models")
+            else:
+                self.logger.warning("⚠️ No models were trained successfully")
+                models = self._generate_fallback_models()
+
+            return models
+
+        except Exception as e:
+            self.logger.error(f"❌ Training pipeline failed: {e}")
+            return self._generate_fallback_models()
+
+    def _get_available_tracks_with_fallback(self) -> List[str]:
+        """Get available tracks with fallback to default list"""
+        try:
+            tracks = self.storage.list_available_tracks()
+            if tracks:
+                return tracks
+            else:
+                self.logger.warning("📝 No tracks from storage, using default tracks")
+                return [
+                    'sonoma', 'indianapolis', 'road-america', 'circuit-of-the-americas',
+                    'sebring', 'virginia-international-raceway', 'barber-motorsports-park'
+                ]
+        except Exception as e:
+            self.logger.error(f"❌ Failed to get tracks: {e}")
+            return ['sonoma', 'indianapolis']  # Minimal fallback
+
+    def _process_all_tracks(self, available_tracks: List[str], state: Dict) -> Dict[str, Dict]:
+        """Process all tracks with incremental progress tracking"""
+        processed_data = self._load_processed_data_state()
         processed_tracks = state.get("processed_tracks", [])
         remaining_tracks = [t for t in available_tracks if t not in processed_tracks]
 
         if not remaining_tracks:
-            self.logger.info("📊 All tracks processed. Finalizing models...")
-            return self._finalize_training()
+            self.logger.info("📊 All tracks already processed")
+            return processed_data
 
-        self.logger.info(f"📥 Processing {len(remaining_tracks)} tracks: {remaining_tracks}")
-        all_processed_data = self._load_processed_data_state()
+        self.logger.info(f"📥 Processing {len(remaining_tracks)} new tracks: {remaining_tracks}")
 
+        successful_processing = 0
         for idx, track in enumerate(remaining_tracks, 1):
             try:
-                self.logger.info(f"🔄 Processing track {idx}/{len(available_tracks)}: {track}")
-                track_data = self._process_single_track(track)
-                if track_data:
-                    all_processed_data[track] = track_data
+                self.logger.info(f"🔄 [{idx}/{len(remaining_tracks)}] Processing: {track}")
+                
+                track_data = self._process_single_track_robustly(track)
+                if self._validate_track_data(track_data):
+                    processed_data[track] = track_data
                     processed_tracks.append(track)
+                    successful_processing += 1
+                    
+                    # Update state after each successful track
                     self._update_training_state({
                         "processed_tracks": processed_tracks,
-                        "processed_data_keys": list(all_processed_data.keys())
+                        "processed_data_keys": list(processed_data.keys())
                     })
-                    self._save_track_data(track, track_data)
-                    self.logger.info(f"✅ Track processed: {track}")
+                    
+                    self.logger.info(f"✅ Successfully processed {track}")
                 else:
-                    self.logger.warning(f"⚠️ Skipped {track}: insufficient data")
+                    self.logger.warning(f"⚠️ Insufficient data in {track}, skipping")
+
             except Exception as e:
                 self.logger.error(f"❌ Failed to process {track}: {e}")
                 continue
 
-        if all_processed_data:
-            models = self._train_models_incrementally(all_processed_data, state.get("models", {}))
-            self._upload_models_to_firebase(models)
-            self._update_training_state({
-                "processed_tracks": processed_tracks,
-                "processed_data_keys": list(all_processed_data.keys()),
-                "models": list(models.keys()),
-                "completed": len(processed_tracks) == len(available_tracks)
-            })
-            return models
-        else:
-            self.logger.error("❌ No valid data processed for training")
-            return {}
+        self.logger.info(f"📊 Processed {successful_processing}/{len(remaining_tracks)} new tracks successfully")
+        return processed_data
 
-    # -------------------------------
-    # SINGLE TRACK PROCESSING
-    # -------------------------------
-    def _process_single_track(self, track: str) -> Dict[str, pd.DataFrame]:
+    def _process_single_track_robustly(self, track: str) -> Dict[str, pd.DataFrame]:
+        """Process single track with comprehensive error handling and caching"""
         cache_file = os.path.join(self.training_state_dir, f"{track}_processed.pkl")
+        
+        # Try to load from cache first
         if os.path.exists(cache_file):
-            self.logger.info(f"📂 Loading cached processed data for {track}")
             try:
-                return joblib.load(cache_file)
-            except Exception:
-                self.logger.warning(f"⚠️ Cached file corrupted. Reprocessing {track}")
+                self.logger.info(f"📂 Loading cached data for {track}")
+                cached_data = joblib.load(cache_file)
+                if self._validate_track_data(cached_data):
+                    return cached_data
+                else:
+                    self.logger.warning(f"⚠️ Cached data for {track} is invalid, reprocessing")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Failed to load cache for {track}: {e}")
 
-        track_raw = self.storage.load_track_data(track)
-        preprocessor = DataPreprocessor()
-        feature_engineer = FeatureEngineer()
-
-        processed = {
-            "lap_data": preprocessor.preprocess_lap_data(track_raw.get("lap_data", pd.DataFrame())),
-            "race_data": preprocessor.preprocess_race_data(track_raw.get("race_data", pd.DataFrame())),
-            "weather_data": preprocessor.preprocess_weather_data(track_raw.get("weather_data", pd.DataFrame())),
-            "telemetry_data": preprocessor.preprocess_telemetry_data(track_raw.get("telemetry_data", pd.DataFrame())),
-        }
-
-        processed = feature_engineer.create_composite_features({track: processed}).get(track, processed)
-        self._log_data_quality(track, processed)
-
+        # Process from raw data
         try:
-            joblib.dump(processed, cache_file)
+            self.logger.info(f"📥 Loading raw data for {track}")
+            track_raw = self.storage.load_track_data(track)
+            
+            if not track_raw:
+                self.logger.warning(f"⚠️ No raw data returned for {track}")
+                return self._generate_empty_track_data()
+
+            # Initialize preprocessor
+            preprocessor = DataPreprocessor(debug=False)
+            
+            # Process each data type with individual error handling
+            processed = {}
+            data_types = ['lap_data', 'race_data', 'weather_data', 'telemetry_data']
+            
+            for data_type in data_types:
+                try:
+                    raw_df = track_raw.get(data_type, pd.DataFrame())
+                    if data_type == 'lap_data':
+                        processed[data_type] = preprocessor.preprocess_lap_data(raw_df, track)
+                    elif data_type == 'race_data':
+                        processed[data_type] = preprocessor.preprocess_race_data(raw_df, track)
+                    elif data_type == 'weather_data':
+                        processed[data_type] = preprocessor.preprocess_weather_data(raw_df, track)
+                    elif data_type == 'telemetry_data':
+                        processed[data_type] = preprocessor.preprocess_telemetry_data(raw_df, track)
+                    
+                    self.logger.debug(f"  ✅ Processed {data_type}: {len(processed[data_type])} rows")
+                    
+                except Exception as e:
+                    self.logger.warning(f"  ⚠️ Failed to process {data_type} for {track}: {e}")
+                    processed[data_type] = pd.DataFrame()
+
+            # Log data quality
+            self._log_data_quality(track, processed)
+
+            # Cache processed data
+            try:
+                joblib.dump(processed, cache_file)
+                self.logger.debug(f"💾 Cached processed data for {track}")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Failed to cache {track}: {e}")
+
+            return processed
+
         except Exception as e:
-            self.logger.warning(f"⚠️ Failed to cache processed data for {track}: {e}")
-        return processed
+            self.logger.error(f"❌ Critical error processing {track}: {e}")
+            return self._generate_empty_track_data()
+
+    def _validate_track_data(self, track_data: Dict[str, pd.DataFrame]) -> bool:
+        """Validate that track data has sufficient quality for training"""
+        if not track_data or not isinstance(track_data, dict):
+            return False
+        
+        # Check if we have at least one substantial data type
+        min_rows_required = 3
+        valid_data_types = 0
+        
+        for data_type, df in track_data.items():
+            if isinstance(df, pd.DataFrame) and len(df) >= min_rows_required:
+                valid_data_types += 1
+        
+        # Require at least lap data and one other data type
+        has_lap_data = (isinstance(track_data.get('lap_data'), pd.DataFrame) and 
+                       len(track_data['lap_data']) >= min_rows_required)
+        
+        return has_lap_data and valid_data_types >= 2
 
     # -------------------------------
-    # INCREMENTAL MODEL TRAINING
+    # MODEL TRAINING WITH VALIDATION
     # -------------------------------
-    def _train_models_incrementally(self, processed_data: Dict, existing_models: Dict = None) -> Dict[str, Any]:
-        self.logger.info("🏃 Training models incrementally...")
+    def _train_models_with_validation(self, processed_data: Dict, existing_models: Dict = None) -> Dict[str, Any]:
+        """Train models with comprehensive data validation"""
+        self.logger.info("🏃 Starting model training with validation...")
         models = existing_models or {}
 
-        # Tire Model
-        tire_data = self._prepare_tire_training_data(processed_data)
-        if tire_data:
-            try:
-                tire_trainer = TireModelTrainer()
-                result = tire_trainer.train(
-                    tire_data["lap_data"], tire_data["telemetry_data"], tire_data["weather_data"]
-                )
-                models["tire_degradation"] = result
-            except Exception as e:
-                self.logger.error(f"❌ Tire model training failed: {e}")
-                models["tire_degradation"] = {"error": str(e)}
+        # Prepare and validate data for each model type
+        training_datasets = self._prepare_all_training_datasets(processed_data)
+        
+        # Train each model type with validation
+        model_trainers = {
+            'tire_degradation': (TireModelTrainer, self._train_tire_model),
+            'fuel_consumption': (FuelModelTrainer, self._train_fuel_model),
+            'pit_strategy': (PitStrategyTrainer, self._train_pit_strategy_model),
+            'weather_impact': (WeatherModelTrainer, self._train_weather_model)
+        }
 
-        # Fuel Model
-        fuel_data = self._prepare_fuel_training_data(processed_data)
-        if fuel_data:
+        for model_name, (trainer_class, train_function) in model_trainers.items():
             try:
-                fuel_trainer = FuelModelTrainer()
-                result = fuel_trainer.train(fuel_data["lap_data"], fuel_data["telemetry_data"])
-                models["fuel_consumption"] = result
+                if model_name in models and 'error' not in models.get(model_name, {}):
+                    self.logger.info(f"📝 Model {model_name} already exists, skipping")
+                    continue
+                    
+                self.logger.info(f"🔧 Training {model_name} model...")
+                result = train_function(trainer_class, training_datasets, processed_data)
+                models[model_name] = result
+                
+                if 'error' in result:
+                    self.logger.error(f"❌ {model_name} training failed: {result['error']}")
+                else:
+                    self.logger.info(f"✅ {model_name} model trained successfully")
+                    
             except Exception as e:
-                self.logger.error(f"❌ Fuel model training failed: {e}")
-                models["fuel_consumption"] = {"error": str(e)}
+                error_msg = f"Critical error training {model_name}: {str(e)}"
+                self.logger.error(f"❌ {error_msg}")
+                models[model_name] = {'error': error_msg}
 
-        # Pit Strategy Model
-        if len(processed_data) >= 2:
-            try:
-                pit_trainer = PitStrategyTrainer()
-                result = pit_trainer.train(processed_data)
-                models["pit_strategy"] = result if "error" not in result else {"error": "Pit strategy training failed"}
-            except Exception as e:
-                self.logger.error(f"❌ Pit strategy model training failed: {e}")
-                models["pit_strategy"] = {"error": str(e)}
-
-        # Weather Model
-        weather_data = self._prepare_weather_training_data(processed_data)
-        if weather_data:
-            try:
-                weather_trainer = WeatherModelTrainer()
-                result = weather_trainer.train(weather_data)
-                models["weather_impact"] = result
-            except Exception as e:
-                self.logger.error(f"❌ Weather model training failed: {e}")
-                models["weather_impact"] = {"error": str(e)}
-
-        self._save_models(models)
-        self.logger.info(f"✅ Incremental training completed: {len(models)} models processed")
+        # Save successful models
+        successful_models = {k: v for k, v in models.items() if 'error' not in v}
+        if successful_models:
+            self._save_models(successful_models)
+            
         return models
 
+    def _prepare_all_training_datasets(self, processed_data: Dict) -> Dict[str, Dict]:
+        """Prepare and validate training datasets for all model types"""
+        datasets = {}
+        
+        # Tire model data
+        tire_data = self._prepare_tire_training_data(processed_data)
+        if self._validate_tire_data(tire_data):
+            datasets['tire'] = tire_data
+        else:
+            self.logger.warning("⚠️ Insufficient data for tire model")
+        
+        # Fuel model data
+        fuel_data = self._prepare_fuel_training_data(processed_data)
+        if self._validate_fuel_data(fuel_data):
+            datasets['fuel'] = fuel_data
+        else:
+            self.logger.warning("⚠️ Insufficient data for fuel model")
+        
+        # Weather model data
+        weather_data = self._prepare_weather_training_data(processed_data)
+        if self._validate_weather_data(weather_data):
+            datasets['weather'] = weather_data
+        else:
+            self.logger.warning("⚠️ Insufficient data for weather model")
+            
+        return datasets
+
+    def _train_tire_model(self, trainer_class, datasets: Dict, processed_data: Dict) -> Dict:
+        """Train tire degradation model with validation"""
+        if 'tire' not in datasets:
+            return {'error': 'Insufficient data for tire model training'}
+        
+        try:
+            trainer = trainer_class()
+            tire_data = datasets['tire']
+            result = trainer.train(
+                tire_data["lap_data"], 
+                tire_data["telemetry_data"], 
+                tire_data["weather_data"]
+            )
+            return result
+        except Exception as e:
+            return {'error': f'Tire model training failed: {str(e)}'}
+
+    def _train_fuel_model(self, trainer_class, datasets: Dict, processed_data: Dict) -> Dict:
+        """Train fuel consumption model with validation"""
+        if 'fuel' not in datasets:
+            return {'error': 'Insufficient data for fuel model training'}
+        
+        try:
+            trainer = trainer_class()
+            fuel_data = datasets['fuel']
+            result = trainer.train(fuel_data["lap_data"], fuel_data["telemetry_data"])
+            return result
+        except Exception as e:
+            return {'error': f'Fuel model training failed: {str(e)}'}
+
+    def _train_pit_strategy_model(self, trainer_class, datasets: Dict, processed_data: Dict) -> Dict:
+        """Train pit strategy model with validation"""
+        # Pit strategy requires multiple tracks with sufficient data
+        valid_tracks = {}
+        for track, data in processed_data.items():
+            if (self._validate_track_data({track: data}) and 
+                len(data.get('lap_data', pd.DataFrame())) >= 5 and
+                len(data.get('race_data', pd.DataFrame())) >= 2):
+                valid_tracks[track] = data
+        
+        if len(valid_tracks) < 2:
+            return {'error': f'Pit strategy requires 2+ tracks with sufficient data (found {len(valid_tracks)})'}
+        
+        try:
+            trainer = trainer_class()
+            result = trainer.train(valid_tracks)
+            return result
+        except Exception as e:
+            return {'error': f'Pit strategy training failed: {str(e)}'}
+
+    def _train_weather_model(self, trainer_class, datasets: Dict, processed_data: Dict) -> Dict:
+        """Train weather impact model with validation"""
+        if 'weather' not in datasets:
+            return {'error': 'Insufficient data for weather model training'}
+        
+        try:
+            trainer = trainer_class()
+            result = trainer.train(datasets['weather'])
+            return result
+        except Exception as e:
+            return {'error': f'Weather model training failed: {str(e)}'}
+
     # -------------------------------
-    # DATA PREPARATION
+    # DATA PREPARATION WITH VALIDATION
     # -------------------------------
     def _prepare_tire_training_data(self, processed_data: Dict) -> Dict[str, pd.DataFrame]:
+        """Prepare tire training data with schema validation"""
         laps, telemetry, weather = [], [], []
+        
         for track, data in processed_data.items():
-            lap, telem, weath = data.get("lap_data", pd.DataFrame()), data.get("telemetry_data", pd.DataFrame()), data.get("weather_data", pd.DataFrame())
-            if len(lap) >= 3 and len(telem) >= 10:
-                laps.append(lap.assign(TRACK=track))
-                telemetry.append(telem)
-                weather.append(weath)
-        if not laps: return {}
-        return {"lap_data": pd.concat(laps, ignore_index=True),
-                "telemetry_data": pd.concat(telemetry, ignore_index=True),
-                "weather_data": pd.concat(weather, ignore_index=True)}
+            lap_data = data.get("lap_data", pd.DataFrame())
+            telemetry_data = data.get("telemetry_data", pd.DataFrame())
+            weather_data = data.get("weather_data", pd.DataFrame())
+            
+            # Validate minimum data requirements
+            if (len(lap_data) >= 5 and len(telemetry_data) >= 10 and 
+                not weather_data.empty):
+                
+                # Add track identifier for debugging
+                lap_data = lap_data.copy().assign(TRACK=track)
+                telemetry_data = telemetry_data.copy().assign(TRACK=track) if not telemetry_data.empty else telemetry_data
+                weather_data = weather_data.copy().assign(TRACK=track) if not weather_data.empty else weather_data
+                
+                laps.append(lap_data)
+                telemetry.append(telemetry_data)
+                weather.append(weather_data)
+        
+        if not laps:
+            return {}
+            
+        try:
+            return {
+                "lap_data": pd.concat(laps, ignore_index=True) if laps else pd.DataFrame(),
+                "telemetry_data": pd.concat(telemetry, ignore_index=True) if telemetry else pd.DataFrame(),
+                "weather_data": pd.concat(weather, ignore_index=True) if weather else pd.DataFrame()
+            }
+        except Exception as e:
+            self.logger.error(f"❌ Failed to concatenate tire data: {e}")
+            return {}
 
     def _prepare_fuel_training_data(self, processed_data: Dict) -> Dict[str, pd.DataFrame]:
+        """Prepare fuel training data with validation"""
         laps, telemetry = [], []
+        
         for track, data in processed_data.items():
-            lap, telem = data.get("lap_data", pd.DataFrame()), data.get("telemetry_data", pd.DataFrame())
-            if len(lap) >= 2 and not telem.empty:
-                laps.append(lap.assign(TRACK=track))
-                telemetry.append(telem)
-        if not laps: return {}
-        return {"lap_data": pd.concat(laps, ignore_index=True),
-                "telemetry_data": pd.concat(telemetry, ignore_index=True)}
+            lap_data = data.get("lap_data", pd.DataFrame())
+            telemetry_data = data.get("telemetry_data", pd.DataFrame())
+            
+            if len(lap_data) >= 3 and len(telemetry_data) >= 5:
+                lap_data = lap_data.copy().assign(TRACK=track)
+                telemetry_data = telemetry_data.copy().assign(TRACK=track) if not telemetry_data.empty else telemetry_data
+                
+                laps.append(lap_data)
+                telemetry.append(telemetry_data)
+        
+        if not laps:
+            return {}
+            
+        try:
+            return {
+                "lap_data": pd.concat(laps, ignore_index=True) if laps else pd.DataFrame(),
+                "telemetry_data": pd.concat(telemetry, ignore_index=True) if telemetry else pd.DataFrame()
+            }
+        except Exception as e:
+            self.logger.error(f"❌ Failed to concatenate fuel data: {e}")
+            return {}
 
     def _prepare_weather_training_data(self, processed_data: Dict) -> Dict:
-        valid = {}
+        """Prepare weather training data with validation"""
+        valid_data = {}
+        
         for track, data in processed_data.items():
-            lap, weather = data.get("lap_data", pd.DataFrame()), data.get("weather_data", pd.DataFrame())
-            if len(lap) >= 3 and len(weather) >= 2:
-                valid[track] = data
-        return valid if len(valid) >= 2 else {}
+            lap_data = data.get("lap_data", pd.DataFrame())
+            weather_data = data.get("weather_data", pd.DataFrame())
+            
+            if len(lap_data) >= 5 and len(weather_data) >= 3:
+                valid_data[track] = data
+        
+        return valid_data if len(valid_data) >= 2 else {}
+
+    def _validate_tire_data(self, tire_data: Dict) -> bool:
+        """Validate tire training data requirements"""
+        return (tire_data and 
+                len(tire_data.get("lap_data", pd.DataFrame())) >= 10 and
+                len(tire_data.get("telemetry_data", pd.DataFrame())) >= 50 and
+                not tire_data.get("weather_data", pd.DataFrame()).empty)
+
+    def _validate_fuel_data(self, fuel_data: Dict) -> bool:
+        """Validate fuel training data requirements"""
+        return (fuel_data and 
+                len(fuel_data.get("lap_data", pd.DataFrame())) >= 8 and
+                len(fuel_data.get("telemetry_data", pd.DataFrame())) >= 20)
+
+    def _validate_weather_data(self, weather_data: Dict) -> bool:
+        """Validate weather training data requirements"""
+        return weather_data and len(weather_data) >= 2
 
     # -------------------------------
-    # MODEL & STATE MANAGEMENT
+    # STATE MANAGEMENT & PERSISTENCE
     # -------------------------------
     def _load_training_state(self) -> Dict:
+        """Load training state with error handling"""
         state_file = os.path.join(self.training_state_dir, "training_state.pkl")
         if os.path.exists(state_file):
-            try: return joblib.load(state_file)
-            except: pass
-        return {"processed_tracks": [], "models": {}}
+            try:
+                state = joblib.load(state_file)
+                if isinstance(state, dict):
+                    return state
+            except Exception as e:
+                self.logger.warning(f"⚠️ Failed to load training state: {e}")
+        return {"processed_tracks": [], "models": {}, "completed": False}
 
     def _update_training_state(self, updates: Dict):
-        state_file = os.path.join(self.training_state_dir, "training_state.pkl")
-        state = self._load_training_state()
-        state.update(updates)
-        try: joblib.dump(state, state_file)
-        except Exception: pass
+        """Update training state with error handling"""
+        try:
+            state = self._load_training_state()
+            state.update(updates)
+            state_file = os.path.join(self.training_state_dir, "training_state.pkl")
+            joblib.dump(state, state_file)
+        except Exception as e:
+            self.logger.error(f"❌ Failed to update training state: {e}")
 
     def _load_processed_data_state(self) -> Dict:
+        """Load all processed track data from cache"""
         processed = {}
-        for track in self._load_training_state().get("processed_data_keys", []):
+        state = self._load_training_state()
+        
+        for track in state.get("processed_data_keys", []):
             cache_file = os.path.join(self.training_state_dir, f"{track}_processed.pkl")
             if os.path.exists(cache_file):
-                try: processed[track] = joblib.load(cache_file)
-                except: continue
+                try:
+                    track_data = joblib.load(cache_file)
+                    if self._validate_track_data(track_data):
+                        processed[track] = track_data
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Failed to load cached data for {track}: {e}")
+                    continue
+        
         return processed
 
-    def _save_track_data(self, track: str, data: Dict):
-        try:
-            joblib.dump(data, os.path.join(self.training_state_dir, f"{track}_processed.pkl"))
-        except Exception: pass
-
-    def _save_models(self, models: Dict[str, Any]) -> Dict[str, str]:
-        saved = {}
+    def _save_models(self, models: Dict[str, Any]):
+        """Save models to disk with comprehensive error handling"""
+        saved_count = 0
         for name, result in models.items():
             try:
+                if 'error' in result:
+                    continue
+                    
                 filepath = os.path.join(self.models_output_dir, f"{name}_model.pkl")
+                
+                # Handle different model result structures
                 if isinstance(result, dict) and "model" in result and hasattr(result["model"], "save_model"):
                     result["model"].save_model(filepath)
                 else:
                     joblib.dump(result, filepath)
-                saved[name] = filepath
+                
+                saved_count += 1
+                self.logger.debug(f"💾 Saved {name} model")
+                
             except Exception as e:
                 self.logger.error(f"❌ Failed to save {name} model: {e}")
-        return saved
+        
+        self.logger.info(f"💾 Saved {saved_count} models to disk")
 
     def _load_existing_models(self) -> Dict:
+        """Load existing models with validation"""
         models = {}
+        if not os.path.exists(self.models_output_dir):
+            return models
+            
         for file in os.listdir(self.models_output_dir):
-            if file.endswith(".pkl"):
+            if file.endswith("_model.pkl"):
                 name = file.replace("_model.pkl", "")
-                try: models[name] = joblib.load(os.path.join(self.models_output_dir, file))
-                except: continue
+                try:
+                    model_path = os.path.join(self.models_output_dir, file)
+                    models[name] = joblib.load(model_path)
+                    self.logger.debug(f"📂 Loaded existing model: {name}")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Failed to load model {name}: {e}")
+                    continue
+        
         return models
 
-    def _finalize_training(self) -> Dict:
-        models = self._load_existing_models()
-        self._update_training_state({"completed": True})
-        return models
+    def _finalize_training_success(self, tracks: List[str], models: Dict):
+        """Finalize successful training"""
+        self._update_training_state({
+            "processed_tracks": tracks,
+            "processed_data_keys": tracks,
+            "models": list(models.keys()),
+            "completed": True
+        })
+        
+        # Upload to Firebase if available
+        self._upload_models_to_firebase(models)
 
     def _upload_models_to_firebase(self, models: Dict[str, Any]):
+        """Upload models to Firebase with error handling"""
         try:
             if hasattr(self.storage, "upload_models_to_firebase"):
                 success = self.storage.upload_models_to_firebase()
-                if success: self.logger.info("🚀 Models uploaded to Firebase Storage")
+                if success:
+                    self.logger.info("🚀 Models uploaded to Firebase Storage")
+                else:
+                    self.logger.warning("⚠️ Firebase upload failed")
         except Exception as e:
-            self.logger.error(f"❌ Firebase upload failed: {e}")
+            self.logger.error(f"❌ Firebase upload error: {e}")
+
+    # -------------------------------
+    # FALLBACKS & ERROR RECOVERY
+    # -------------------------------
+    def _generate_fallback_models(self) -> Dict[str, Any]:
+        """Generate fallback models when training fails"""
+        self.logger.warning("🔄 Generating fallback models...")
+        
+        fallback_models = {}
+        fallback_message = {"error": "Training failed, using fallback model"}
+        
+        # Create fallback entries for all expected models
+        expected_models = ['tire_degradation', 'fuel_consumption', 'pit_strategy', 'weather_impact']
+        for model_name in expected_models:
+            fallback_models[model_name] = fallback_message
+            
+        return fallback_models
+
+    def _generate_empty_track_data(self) -> Dict[str, pd.DataFrame]:
+        """Generate empty track data structure"""
+        return {
+            'lap_data': pd.DataFrame(),
+            'race_data': pd.DataFrame(), 
+            'weather_data': pd.DataFrame(),
+            'telemetry_data': pd.DataFrame()
+        }
 
     # -------------------------------
     # LOGGING & VALIDATION
     # -------------------------------
     def _log_data_quality(self, track: str, data: Dict[str, pd.DataFrame]):
+        """Log data quality metrics"""
         report = {}
-        for k, df in data.items():
+        for data_type, df in data.items():
             if df.empty:
-                report[k] = "EMPTY"
+                report[data_type] = "EMPTY"
             else:
-                report[k] = {
+                report[data_type] = {
                     "rows": len(df),
                     "columns": len(df.columns),
-                    "null_pct": (df.isnull().sum().sum() / (len(df) * len(df.columns)) * 100)
+                    "null_pct": round((df.isnull().sum().sum() / (len(df) * len(df.columns)) * 100), 2) if len(df) > 0 else 0
                 }
+        
         self.logger.info(f"📊 {track} data quality: {report}")
 
     def validate_training_results(self, models: Dict) -> Dict[str, Any]:
+        """Validate and report training results"""
         results = {}
         for name, result in models.items():
             if isinstance(result, dict) and "error" in result:
@@ -299,9 +611,342 @@ class TrainingOrchestrator:
                 score = result["test_score"]
                 status = "GOOD" if score > 0.7 else "FAIR" if score > 0.5 else "POOR"
                 results[name] = {"status": status, "test_score": score, "training_samples": result.get("training_samples", 0)}
+            elif isinstance(result, dict) and "model" in result:
+                results[name] = {"status": "TRAINED", "details": "Model trained successfully"}
             else:
-                results[name] = {"status": "UNKNOWN", "result": result}
+                results[name] = {"status": "UNKNOWN", "result": str(result)[:100]}
+        
         return results
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# import os
+# import logging
+# import joblib
+# import pandas as pd
+# from typing import Dict, Any
+
+# from models.tire_trainer import TireModelTrainer
+# from models.fuel_trainer import FuelModelTrainer
+# from models.pit_strategy_trainer import PitStrategyTrainer
+# from models.weather_trainer import WeatherModelTrainer
+# from data.preprocessor import DataPreprocessor
+# from data.feature_engineer import FeatureEngineer
+
+
+# class TrainingOrchestrator:
+#     def __init__(self, storage):
+#         self.storage = storage
+#         self.logger = logging.getLogger(__name__)
+#         self.models_output_dir = "outputs/models"
+#         self.training_state_dir = "outputs/training_state"
+#         os.makedirs(self.models_output_dir, exist_ok=True)
+#         os.makedirs(self.training_state_dir, exist_ok=True)
+
+#     # -------------------------------
+#     # MAIN TRAINING PIPELINE
+#     # -------------------------------
+#     def train_all_models(self) -> dict:
+#         self.logger.info("🚀 Starting robust model training pipeline...")
+
+#         state = self._load_training_state()
+#         if state.get("completed", False):
+#             self.logger.info("✅ Training already completed. Loading models...")
+#             return self._load_existing_models()
+
+#         available_tracks = self.storage.list_available_tracks()
+#         if not available_tracks:
+#             self.logger.error("❌ No tracks available in storage")
+#             return {}
+
+#         processed_tracks = state.get("processed_tracks", [])
+#         remaining_tracks = [t for t in available_tracks if t not in processed_tracks]
+
+#         if not remaining_tracks:
+#             self.logger.info("📊 All tracks processed. Finalizing models...")
+#             return self._finalize_training()
+
+#         self.logger.info(f"📥 Processing {len(remaining_tracks)} tracks: {remaining_tracks}")
+#         all_processed_data = self._load_processed_data_state()
+
+#         for idx, track in enumerate(remaining_tracks, 1):
+#             try:
+#                 self.logger.info(f"🔄 Processing track {idx}/{len(available_tracks)}: {track}")
+#                 track_data = self._process_single_track(track)
+#                 if track_data:
+#                     all_processed_data[track] = track_data
+#                     processed_tracks.append(track)
+#                     self._update_training_state({
+#                         "processed_tracks": processed_tracks,
+#                         "processed_data_keys": list(all_processed_data.keys())
+#                     })
+#                     self._save_track_data(track, track_data)
+#                     self.logger.info(f"✅ Track processed: {track}")
+#                 else:
+#                     self.logger.warning(f"⚠️ Skipped {track}: insufficient data")
+#             except Exception as e:
+#                 self.logger.error(f"❌ Failed to process {track}: {e}")
+#                 continue
+
+#         if all_processed_data:
+#             models = self._train_models_incrementally(all_processed_data, state.get("models", {}))
+#             self._upload_models_to_firebase(models)
+#             self._update_training_state({
+#                 "processed_tracks": processed_tracks,
+#                 "processed_data_keys": list(all_processed_data.keys()),
+#                 "models": list(models.keys()),
+#                 "completed": len(processed_tracks) == len(available_tracks)
+#             })
+#             return models
+#         else:
+#             self.logger.error("❌ No valid data processed for training")
+#             return {}
+
+#     # -------------------------------
+#     # SINGLE TRACK PROCESSING
+#     # -------------------------------
+#     def _process_single_track(self, track: str) -> Dict[str, pd.DataFrame]:
+#         cache_file = os.path.join(self.training_state_dir, f"{track}_processed.pkl")
+#         if os.path.exists(cache_file):
+#             self.logger.info(f"📂 Loading cached processed data for {track}")
+#             try:
+#                 return joblib.load(cache_file)
+#             except Exception:
+#                 self.logger.warning(f"⚠️ Cached file corrupted. Reprocessing {track}")
+
+#         track_raw = self.storage.load_track_data(track)
+#         preprocessor = DataPreprocessor()
+#         feature_engineer = FeatureEngineer()
+
+#         processed = {
+#             "lap_data": preprocessor.preprocess_lap_data(track_raw.get("lap_data", pd.DataFrame())),
+#             "race_data": preprocessor.preprocess_race_data(track_raw.get("race_data", pd.DataFrame())),
+#             "weather_data": preprocessor.preprocess_weather_data(track_raw.get("weather_data", pd.DataFrame())),
+#             "telemetry_data": preprocessor.preprocess_telemetry_data(track_raw.get("telemetry_data", pd.DataFrame())),
+#         }
+
+#         processed = feature_engineer.create_composite_features({track: processed}).get(track, processed)
+#         self._log_data_quality(track, processed)
+
+#         try:
+#             joblib.dump(processed, cache_file)
+#         except Exception as e:
+#             self.logger.warning(f"⚠️ Failed to cache processed data for {track}: {e}")
+#         return processed
+
+#     # -------------------------------
+#     # INCREMENTAL MODEL TRAINING
+#     # -------------------------------
+#     def _train_models_incrementally(self, processed_data: Dict, existing_models: Dict = None) -> Dict[str, Any]:
+#         self.logger.info("🏃 Training models incrementally...")
+#         models = existing_models or {}
+
+#         # Tire Model
+#         tire_data = self._prepare_tire_training_data(processed_data)
+#         if tire_data:
+#             try:
+#                 tire_trainer = TireModelTrainer()
+#                 result = tire_trainer.train(
+#                     tire_data["lap_data"], tire_data["telemetry_data"], tire_data["weather_data"]
+#                 )
+#                 models["tire_degradation"] = result
+#             except Exception as e:
+#                 self.logger.error(f"❌ Tire model training failed: {e}")
+#                 models["tire_degradation"] = {"error": str(e)}
+
+#         # Fuel Model
+#         fuel_data = self._prepare_fuel_training_data(processed_data)
+#         if fuel_data:
+#             try:
+#                 fuel_trainer = FuelModelTrainer()
+#                 result = fuel_trainer.train(fuel_data["lap_data"], fuel_data["telemetry_data"])
+#                 models["fuel_consumption"] = result
+#             except Exception as e:
+#                 self.logger.error(f"❌ Fuel model training failed: {e}")
+#                 models["fuel_consumption"] = {"error": str(e)}
+
+#         # Pit Strategy Model
+#         if len(processed_data) >= 2:
+#             try:
+#                 pit_trainer = PitStrategyTrainer()
+#                 result = pit_trainer.train(processed_data)
+#                 models["pit_strategy"] = result if "error" not in result else {"error": "Pit strategy training failed"}
+#             except Exception as e:
+#                 self.logger.error(f"❌ Pit strategy model training failed: {e}")
+#                 models["pit_strategy"] = {"error": str(e)}
+
+#         # Weather Model
+#         weather_data = self._prepare_weather_training_data(processed_data)
+#         if weather_data:
+#             try:
+#                 weather_trainer = WeatherModelTrainer()
+#                 result = weather_trainer.train(weather_data)
+#                 models["weather_impact"] = result
+#             except Exception as e:
+#                 self.logger.error(f"❌ Weather model training failed: {e}")
+#                 models["weather_impact"] = {"error": str(e)}
+
+#         self._save_models(models)
+#         self.logger.info(f"✅ Incremental training completed: {len(models)} models processed")
+#         return models
+
+#     # -------------------------------
+#     # DATA PREPARATION
+#     # -------------------------------
+#     def _prepare_tire_training_data(self, processed_data: Dict) -> Dict[str, pd.DataFrame]:
+#         laps, telemetry, weather = [], [], []
+#         for track, data in processed_data.items():
+#             lap, telem, weath = data.get("lap_data", pd.DataFrame()), data.get("telemetry_data", pd.DataFrame()), data.get("weather_data", pd.DataFrame())
+#             if len(lap) >= 3 and len(telem) >= 10:
+#                 laps.append(lap.assign(TRACK=track))
+#                 telemetry.append(telem)
+#                 weather.append(weath)
+#         if not laps: return {}
+#         return {"lap_data": pd.concat(laps, ignore_index=True),
+#                 "telemetry_data": pd.concat(telemetry, ignore_index=True),
+#                 "weather_data": pd.concat(weather, ignore_index=True)}
+
+#     def _prepare_fuel_training_data(self, processed_data: Dict) -> Dict[str, pd.DataFrame]:
+#         laps, telemetry = [], []
+#         for track, data in processed_data.items():
+#             lap, telem = data.get("lap_data", pd.DataFrame()), data.get("telemetry_data", pd.DataFrame())
+#             if len(lap) >= 2 and not telem.empty:
+#                 laps.append(lap.assign(TRACK=track))
+#                 telemetry.append(telem)
+#         if not laps: return {}
+#         return {"lap_data": pd.concat(laps, ignore_index=True),
+#                 "telemetry_data": pd.concat(telemetry, ignore_index=True)}
+
+#     def _prepare_weather_training_data(self, processed_data: Dict) -> Dict:
+#         valid = {}
+#         for track, data in processed_data.items():
+#             lap, weather = data.get("lap_data", pd.DataFrame()), data.get("weather_data", pd.DataFrame())
+#             if len(lap) >= 3 and len(weather) >= 2:
+#                 valid[track] = data
+#         return valid if len(valid) >= 2 else {}
+
+#     # -------------------------------
+#     # MODEL & STATE MANAGEMENT
+#     # -------------------------------
+#     def _load_training_state(self) -> Dict:
+#         state_file = os.path.join(self.training_state_dir, "training_state.pkl")
+#         if os.path.exists(state_file):
+#             try: return joblib.load(state_file)
+#             except: pass
+#         return {"processed_tracks": [], "models": {}}
+
+#     def _update_training_state(self, updates: Dict):
+#         state_file = os.path.join(self.training_state_dir, "training_state.pkl")
+#         state = self._load_training_state()
+#         state.update(updates)
+#         try: joblib.dump(state, state_file)
+#         except Exception: pass
+
+#     def _load_processed_data_state(self) -> Dict:
+#         processed = {}
+#         for track in self._load_training_state().get("processed_data_keys", []):
+#             cache_file = os.path.join(self.training_state_dir, f"{track}_processed.pkl")
+#             if os.path.exists(cache_file):
+#                 try: processed[track] = joblib.load(cache_file)
+#                 except: continue
+#         return processed
+
+#     def _save_track_data(self, track: str, data: Dict):
+#         try:
+#             joblib.dump(data, os.path.join(self.training_state_dir, f"{track}_processed.pkl"))
+#         except Exception: pass
+
+#     def _save_models(self, models: Dict[str, Any]) -> Dict[str, str]:
+#         saved = {}
+#         for name, result in models.items():
+#             try:
+#                 filepath = os.path.join(self.models_output_dir, f"{name}_model.pkl")
+#                 if isinstance(result, dict) and "model" in result and hasattr(result["model"], "save_model"):
+#                     result["model"].save_model(filepath)
+#                 else:
+#                     joblib.dump(result, filepath)
+#                 saved[name] = filepath
+#             except Exception as e:
+#                 self.logger.error(f"❌ Failed to save {name} model: {e}")
+#         return saved
+
+#     def _load_existing_models(self) -> Dict:
+#         models = {}
+#         for file in os.listdir(self.models_output_dir):
+#             if file.endswith(".pkl"):
+#                 name = file.replace("_model.pkl", "")
+#                 try: models[name] = joblib.load(os.path.join(self.models_output_dir, file))
+#                 except: continue
+#         return models
+
+#     def _finalize_training(self) -> Dict:
+#         models = self._load_existing_models()
+#         self._update_training_state({"completed": True})
+#         return models
+
+#     def _upload_models_to_firebase(self, models: Dict[str, Any]):
+#         try:
+#             if hasattr(self.storage, "upload_models_to_firebase"):
+#                 success = self.storage.upload_models_to_firebase()
+#                 if success: self.logger.info("🚀 Models uploaded to Firebase Storage")
+#         except Exception as e:
+#             self.logger.error(f"❌ Firebase upload failed: {e}")
+
+#     # -------------------------------
+#     # LOGGING & VALIDATION
+#     # -------------------------------
+#     def _log_data_quality(self, track: str, data: Dict[str, pd.DataFrame]):
+#         report = {}
+#         for k, df in data.items():
+#             if df.empty:
+#                 report[k] = "EMPTY"
+#             else:
+#                 report[k] = {
+#                     "rows": len(df),
+#                     "columns": len(df.columns),
+#                     "null_pct": (df.isnull().sum().sum() / (len(df) * len(df.columns)) * 100)
+#                 }
+#         self.logger.info(f"📊 {track} data quality: {report}")
+
+#     def validate_training_results(self, models: Dict) -> Dict[str, Any]:
+#         results = {}
+#         for name, result in models.items():
+#             if isinstance(result, dict) and "error" in result:
+#                 results[name] = {"status": "FAILED", "error": result["error"]}
+#             elif isinstance(result, dict) and "accuracy" in result:
+#                 acc = result["accuracy"]
+#                 status = "GOOD" if acc > 0.8 else "FAIR" if acc > 0.6 else "POOR"
+#                 results[name] = {"status": status, "accuracy": acc, "training_samples": result.get("training_samples", 0)}
+#             elif isinstance(result, dict) and "test_score" in result:
+#                 score = result["test_score"]
+#                 status = "GOOD" if score > 0.7 else "FAIR" if score > 0.5 else "POOR"
+#                 results[name] = {"status": status, "test_score": score, "training_samples": result.get("training_samples", 0)}
+#             else:
+#                 results[name] = {"status": "UNKNOWN", "result": result}
+#         return results
 
 
 
