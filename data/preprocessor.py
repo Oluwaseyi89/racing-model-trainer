@@ -1,16 +1,14 @@
 import re
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, Optional, Iterable, List
+from typing import Dict, Any, Optional
 
 
 def _clean_col(col: str) -> str:
     """Normalize column names: strip BOM/whitespace, uppercase, replace separators with _"""
     if not isinstance(col, str):
         return col
-    # remove BOM if present
     col = col.lstrip('\ufeff').strip()
-    # replace multiple non-alphanum with underscore
     col = re.sub(r'[^0-9A-Za-z]+', '_', col)
     col = re.sub(r'__+', '_', col)
     return col.upper()
@@ -18,22 +16,16 @@ def _clean_col(col: str) -> str:
 
 class DataPreprocessor:
     """
-    Robust preprocessor for lap, race, telemetry and weather datasets.
-    - Use DataPreprocessor.preprocess_* entrypoints
-    - Set debug=True to print diagnostics
+    Robust preprocessor for lap, race, telemetry, and weather datasets.
     """
 
-    # canonical telemetry name mappings
     TELEMETRY_MAP = {
         'ACCX_CAN': 'LONGITUDINAL_ACCEL',
         'ACCY_CAN': 'LATERAL_ACCEL',
         'APS': 'THROTTLE_POSITION',
-        'PBRACE_F': 'BRAKE_PRESSURE_FRONT',  # some datasets have typos, keep mapping flexible
+        'PBRACE_F': 'BRAKE_PRESSURE_FRONT',
         'PBRK_F': 'BRAKE_PRESSURE_FRONT',
         'PBRK_R': 'BRAKE_PRESSURE_REAR',
-        'PBRK_RR': 'BRAKE_PRESSURE_REAR',
-        'PBRK_R_': 'BRAKE_PRESSURE_REAR',
-        'PBRKE_R': 'BRAKE_PRESSURE_REAR',
         'PBRK_RR': 'BRAKE_PRESSURE_REAR',
         'PBRACE_R': 'BRAKE_PRESSURE_REAR',
         'PBRK': 'BRAKE_PRESSURE',
@@ -43,7 +35,6 @@ class DataPreprocessor:
         'STEERING_ANGLE': 'STEERING_ANGLE',
         'VBOX_LONG_MINUTES': 'VBOX_LONG_MIN',
         'VBOX_LAT_MIN': 'VBOX_LAT_MIN',
-        # Add more if your telemetry keys vary
     }
 
     @staticmethod
@@ -56,239 +47,144 @@ class DataPreprocessor:
     # --------------------
     @staticmethod
     def preprocess_lap_data(lap_df: Optional[pd.DataFrame], debug: bool = False) -> pd.DataFrame:
-        if lap_df is None:
-            DataPreprocessor._debug_print(debug, "⚠️ Lap data is None, returning empty DataFrame")
+        if lap_df is None or lap_df.empty:
+            DataPreprocessor._debug_print(debug, "⚠️ Lap data is empty or None")
             return pd.DataFrame()
-        if isinstance(lap_df, pd.Series):
-            lap_df = lap_df.to_frame().T
-        if lap_df.empty:
-            DataPreprocessor._debug_print(debug, "⚠️ Lap data is empty, returning empty DataFrame")
-            return pd.DataFrame()
-
         df = lap_df.copy()
         df = DataPreprocessor._normalize_dataframe(df, debug=debug)
 
-        # common time/sector fields to convert to seconds (if present)
-        time_columns = [
-            'LAP_TIME', 'TIME', 'FL_TIME', 'S1', 'S2', 'S3',
-            'S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS', 'LAP_TIME_SECONDS'
-        ]
-        for c in time_columns:
-            if c in df.columns:
-                df[f"{c}_SECONDS"] = df[c].apply(DataPreprocessor.time_to_seconds)
+        # Convert times to seconds
+        time_cols = ['LAP_TIME', 'TIME', 'FL_TIME', 'S1', 'S2', 'S3', 'LAP_TIME_SECONDS']
+        for col in time_cols:
+            if col in df.columns:
+                df[f"{col}_SECONDS"] = df[col].apply(DataPreprocessor.time_to_seconds)
 
-        # gap columns
-        for col in ['GAP_FIRST', 'GAP_PREVIOUS', 'GAP']:
+        # Convert gap columns to seconds
+        for col in ['GAP', 'GAP_FIRST', 'GAP_PREVIOUS']:
             if col in df.columns:
                 df[f"{col}_SECONDS"] = df[col].apply(DataPreprocessor.gap_to_seconds)
 
-        # lap number detection
-        lap_num_candidates = ['LAP_NUMBER', 'LAP', 'LAPNUM', 'FL_LAPNUM']
-        for cand in lap_num_candidates:
-            if cand in df.columns and not df[cand].empty:
+        # Identify lap numbers
+        lap_candidates = ['LAP_NUMBER', 'LAP', 'LAPNUM', 'FL_LAPNUM']
+        for cand in lap_candidates:
+            if cand in df.columns:
                 df['LAP_NUMBER'] = pd.to_numeric(df[cand], errors='coerce')
-                DataPreprocessor._debug_print(debug, f"✅ Found lap number column: {cand}")
+                DataPreprocessor._debug_print(debug, f"✅ Detected lap column: {cand}")
                 break
 
-        # driver number detection
+        # Identify driver/car numbers
         num_candidates = ['NUMBER', 'DRIVER_NUMBER', 'DRIVERNO', 'DRIVER_NO']
         for cand in num_candidates:
             if cand in df.columns:
                 df['NUMBER'] = pd.to_numeric(df[cand], errors='coerce')
-                DataPreprocessor._debug_print(debug, f"✅ Found driver number column: {cand}")
+                DataPreprocessor._debug_print(debug, f"✅ Detected driver column: {cand}")
                 break
 
         # KPH
         if 'KPH' in df.columns:
             df['KPH'] = pd.to_numeric(df['KPH'], errors='coerce')
 
-        # create summary metrics if lap_time present
-        if 'LAP_TIME_SECONDS' in df.columns:
+        # Performance metrics
+        if 'LAP_TIME_SECONDS' in df.columns and 'NUMBER' in df.columns:
             df['PERFORMANCE_DROP'] = df.groupby('NUMBER')['LAP_TIME_SECONDS'].transform(lambda x: x - x.min())
             df['CONSISTENCY'] = df.groupby('NUMBER')['LAP_TIME_SECONDS'].transform('std')
 
-        # improvements (sometimes are strings)
-        for inc in ['S1_IMPROVEMENT', 'S2_IMPROVEMENT', 'S3_IMPROVEMENT', 'LAP_IMPROVEMENT']:
-            if inc in df.columns:
-                df[f"{inc}_SECONDS"] = df[inc].apply(DataPreprocessor.time_to_seconds)
-
-        # numeric cleanups
-        for c in ['POSITION', 'POS', 'PIC', 'NUMBER', 'LAPS', 'TOTAL_LAPS']:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors='coerce')
-
-        DataPreprocessor._debug_print(debug, f"✅ Processed lap data with {len(df)} rows and columns: {list(df.columns)}")
         return df
 
     @staticmethod
     def preprocess_race_data(race_df: Optional[pd.DataFrame], debug: bool = False) -> pd.DataFrame:
-        if race_df is None:
-            DataPreprocessor._debug_print(debug, "⚠️ Race data is None, returning empty DataFrame")
+        if race_df is None or race_df.empty:
+            DataPreprocessor._debug_print(debug, "⚠️ Race data is empty or None")
             return pd.DataFrame()
-        if isinstance(race_df, pd.Series):
-            race_df = race_df.to_frame().T
-        if race_df.empty:
-            DataPreprocessor._debug_print(debug, "⚠️ Race data is empty, returning empty DataFrame")
-            return pd.DataFrame()
-
         df = race_df.copy()
         df = DataPreprocessor._normalize_dataframe(df, debug=debug)
 
-        # Position detection with safe checks to avoid ambiguous Series truth values
-        pos_candidates = ['POSITION', 'POS', 'PIC']
-        position_found = False
-        for cand in pos_candidates:
-            if cand in df.columns:
-                col = df[cand]
-                # explicit emptiness and 1-d checks
-                if not col.empty and (isinstance(col, pd.Series) or hasattr(col, '__len__')):
-                    try:
-                        df['POSITION'] = pd.to_numeric(col, errors='coerce')
-                        position_found = True
-                        DataPreprocessor._debug_print(debug, f"✅ Using position column: {cand}")
-                        break
-                    except Exception as e:
-                        DataPreprocessor._debug_print(debug, f"❌ Error processing position column {cand}: {e}")
-                        continue
+        # Position columns
+        pos_cols = ['POSITION', 'POS', 'PIC']
+        for col in pos_cols:
+            if col in df.columns:
+                try:
+                    df['POSITION'] = pd.to_numeric(df[col], errors='coerce')
+                    break
+                except Exception:
+                    continue
+        if 'POSITION' not in df.columns:
+            df['POSITION'] = np.arange(1, len(df) + 1)
 
-        if not position_found:
-            DataPreprocessor._debug_print(debug, "⚠️ No valid position column found, creating default positions")
-            if len(df) > 0:
-                df['POSITION'] = list(range(1, len(df) + 1))
-            else:
-                df['POSITION'] = pd.Series(dtype='float64')
-
-        # total time -> seconds
+        # Convert total time
         if 'TOTAL_TIME' in df.columns:
             df['TOTAL_TIME_SECONDS'] = df['TOTAL_TIME'].apply(DataPreprocessor.race_time_to_seconds)
 
-        # gap columns safe parse
-        for col in ['GAP_FIRST', 'GAP_PREVIOUS', 'GAP']:
+        # Convert gap columns
+        for col in ['GAP', 'GAP_FIRST', 'GAP_PREVIOUS']:
             if col in df.columns:
-                try:
-                    df[f"{col}_SECONDS"] = df[col].apply(DataPreprocessor.gap_to_seconds)
-                except Exception as e:
-                    DataPreprocessor._debug_print(debug, f"❌ Error processing gap column {col}: {e}")
-                    df[f"{col}_SECONDS"] = np.nan
+                df[f"{col}_SECONDS"] = df[col].apply(DataPreprocessor.gap_to_seconds)
 
-        # best lap / fastest lap falls back FL_TIME
-        if 'BEST_LAP_TIME' in df.columns:
-            df['BEST_LAP_SECONDS'] = df['BEST_LAP_TIME'].apply(DataPreprocessor.time_to_seconds)
-        elif 'FL_TIME' in df.columns:
-            df['BEST_LAP_SECONDS'] = df['FL_TIME'].apply(DataPreprocessor.time_to_seconds)
+        # Best lap time
+        best_lap_col = 'BEST_LAP_TIME' if 'BEST_LAP_TIME' in df.columns else 'FL_TIME'
+        if best_lap_col in df.columns:
+            df['BEST_LAP_SECONDS'] = df[best_lap_col].apply(DataPreprocessor.time_to_seconds)
 
-        # numeric conversions with safe fallback
-        for c in ['NUMBER', 'LAPS', 'FL_LAPNUM', 'BEST_LAP_NUM', 'PIC']:
-            if c in df.columns:
-                try:
-                    df[c] = pd.to_numeric(df[c], errors='coerce')
-                except Exception:
-                    df[c] = np.nan
-
-        DataPreprocessor._debug_print(debug, f"✅ Processed race data with {len(df)} rows and columns: {list(df.columns)}")
         return df
 
     @staticmethod
     def preprocess_weather_data(weather_df: Optional[pd.DataFrame], debug: bool = False) -> pd.DataFrame:
-        if weather_df is None:
-            DataPreprocessor._debug_print(debug, "⚠️ Weather data is None, returning empty DataFrame")
+        if weather_df is None or weather_df.empty:
+            DataPreprocessor._debug_print(debug, "⚠️ Weather data is empty or None")
             return pd.DataFrame()
-        if isinstance(weather_df, pd.Series):
-            weather_df = weather_df.to_frame().T
-        if weather_df.empty:
-            DataPreprocessor._debug_print(debug, "⚠️ Weather data is empty, returning empty DataFrame")
-            return pd.DataFrame()
-
         df = weather_df.copy()
         df = DataPreprocessor._normalize_dataframe(df, debug=debug)
 
-        # timestamp columns
-        ts_candidates = ['TIME_UTC_SECONDS', 'TIME_UTC_STR', 'TIMESTAMP', 'TIME']
-        parsed = False
-        for cand in ts_candidates:
-            if cand in df.columns:
-                if cand == 'TIME_UTC_SECONDS':
-                    try:
-                        df['timestamp'] = pd.to_datetime(pd.to_numeric(df[cand], errors='coerce'), unit='s', errors='coerce')
-                        parsed = True
-                    except Exception:
-                        parsed = False
-                else:
-                    df['timestamp'] = DataPreprocessor._safe_datetime_parse(df[cand])
-                    parsed = True
-                if parsed:
-                    DataPreprocessor._debug_print(debug, f"✅ Parsed weather timestamp from {cand}")
-                    break
+        # Parse timestamp
+        ts_cols = ['TIME_UTC_SECONDS', 'TIME_UTC_STR', 'TIMESTAMP', 'TIME']
+        for col in ts_cols:
+            if col in df.columns:
+                df['timestamp'] = DataPreprocessor._safe_datetime_parse(df[col])
+                DataPreprocessor._debug_print(debug, f"✅ Weather timestamp parsed from {col}")
+                break
 
-        # numeric weather columns
-        for c in ['AIR_TEMP', 'TRACK_TEMP', 'HUMIDITY', 'PRESSURE', 'WIND_SPEED', 'WIND_DIRECTION', 'RAIN']:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors='coerce')
+        # Convert numeric weather columns
+        for col in ['AIR_TEMP', 'TRACK_TEMP', 'HUMIDITY', 'PRESSURE', 'WIND_SPEED', 'WIND_DIRECTION', 'RAIN']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        DataPreprocessor._debug_print(debug, f"✅ Processed weather data with {len(df)} rows and columns: {list(df.columns)}")
         return df
 
     @staticmethod
     def preprocess_telemetry_data(telemetry_df: Optional[pd.DataFrame], debug: bool = False) -> pd.DataFrame:
-        if telemetry_df is None:
-            DataPreprocessor._debug_print(debug, "⚠️ Telemetry data is None, returning empty DataFrame")
+        if telemetry_df is None or telemetry_df.empty:
+            DataPreprocessor._debug_print(debug, "⚠️ Telemetry data is empty or None")
             return pd.DataFrame()
-        if isinstance(telemetry_df, pd.Series):
-            telemetry_df = telemetry_df.to_frame().T
-        if telemetry_df.empty:
-            DataPreprocessor._debug_print(debug, "⚠️ Telemetry data is empty, returning empty DataFrame")
-            return pd.DataFrame()
-
         df = telemetry_df.copy()
         df = DataPreprocessor._normalize_dataframe(df, debug=debug)
 
-        # Some datasets are long format: columns telemetry_name, telemetry_value
-        # Support both long and wide formats
-        long_name_cols = [c for c in df.columns if 'TELEMETRY_NAME' in c or 'TELEMETRY' == c]
-        if {'TELEMETRY_NAME', 'TELEMETRY_VALUE'}.issubset(set(df.columns)):
-            # pivot long -> wide
-            try:
-                pivoted = df.pivot_table(index=[c for c in df.columns if c not in ['TELEMETRY_NAME', 'TELEMETRY_VALUE']],
-                                         columns='TELEMETRY_NAME', values='TELEMETRY_VALUE', aggfunc='first').reset_index()
-                df = DataPreprocessor._normalize_dataframe(pivoted, debug=debug)
-                DataPreprocessor._debug_print(debug, "✅ Telemetry long->wide pivoted")
-            except Exception as e:
-                DataPreprocessor._debug_print(debug, f"⚠️ Could not pivot telemetry long format: {e}")
+        # Pivot long format telemetry if present
+        if {'TELEMETRY_NAME', 'TELEMETRY_VALUE'}.issubset(df.columns):
+            df = df.pivot_table(index=[c for c in df.columns if c not in ['TELEMETRY_NAME', 'TELEMETRY_VALUE']],
+                                columns='TELEMETRY_NAME', values='TELEMETRY_VALUE', aggfunc='first').reset_index()
+            df = DataPreprocessor._normalize_dataframe(df, debug=debug)
+            DataPreprocessor._debug_print(debug, "✅ Telemetry long->wide pivoted")
 
-        # Rename known telemetry keys to canonical names and coerce numeric
+        # Canonical telemetry mapping
         for col in list(df.columns):
+            key_upper = col.upper()
             if col in DataPreprocessor.TELEMETRY_MAP:
-                canonical = DataPreprocessor.TELEMETRY_MAP[col]
-                df[canonical] = pd.to_numeric(df[col], errors='coerce')
+                df[DataPreprocessor.TELEMETRY_MAP[col]] = pd.to_numeric(df[col], errors='coerce')
+            elif key_upper in DataPreprocessor.TELEMETRY_MAP:
+                df[DataPreprocessor.TELEMETRY_MAP[key_upper]] = pd.to_numeric(df[col], errors='coerce')
 
-        # If telemetry keys appear in lower-case or camelCase, check that too
-        for col in list(df.columns):
-            up = col.upper()
-            if up in DataPreprocessor.TELEMETRY_MAP and up != col:
-                canonical = DataPreprocessor.TELEMETRY_MAP[up]
-                df[canonical] = pd.to_numeric(df[col], errors='coerce')
-
-        # Derived telemetry
+        # Derived metrics
         if 'BRAKE_PRESSURE_FRONT' in df.columns and 'BRAKE_PRESSURE_REAR' in df.columns:
-            df['TOTAL_BRAKE_PRESSURE'] = (pd.to_numeric(df['BRAKE_PRESSURE_FRONT'], errors='coerce') +
-                                          pd.to_numeric(df['BRAKE_PRESSURE_REAR'], errors='coerce')) / 2.0
-
+            df['TOTAL_BRAKE_PRESSURE'] = (df['BRAKE_PRESSURE_FRONT'] + df['BRAKE_PRESSURE_REAR']) / 2
         if 'LONGITUDINAL_ACCEL' in df.columns and 'LATERAL_ACCEL' in df.columns:
-            df['TOTAL_ACCEL'] = np.sqrt(
-                pd.to_numeric(df['LONGITUDINAL_ACCEL'], errors='coerce')**2 +
-                pd.to_numeric(df['LATERAL_ACCEL'], errors='coerce')**2
-            )
+            df['TOTAL_ACCEL'] = np.sqrt(df['LONGITUDINAL_ACCEL']**2 + df['LATERAL_ACCEL']**2)
 
-        # safe timestamp parse if present
-        for cand in ['TIMESTAMP', 'TIME', 'TIME_UTC_STR', 'TIME_UTC_SECONDS']:
-            if cand in df.columns:
-                if cand == 'TIME_UTC_SECONDS':
-                    df['timestamp'] = pd.to_datetime(pd.to_numeric(df[cand], errors='coerce'), unit='s', errors='coerce')
-                else:
-                    df['timestamp'] = DataPreprocessor._safe_datetime_parse(df[cand])
+        # Parse timestamps safely
+        for col in ['TIMESTAMP', 'TIME', 'TIME_UTC_STR', 'TIME_UTC_SECONDS']:
+            if col in df.columns:
+                df['timestamp'] = DataPreprocessor._safe_datetime_parse(df[col])
                 break
 
-        DataPreprocessor._debug_print(debug, f"✅ Processed telemetry data with {len(df)} rows and columns: {list(df.columns)}")
         return df
 
     # --------------------
@@ -296,164 +192,547 @@ class DataPreprocessor:
     # --------------------
     @staticmethod
     def _normalize_dataframe(df: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
-        """Clean column names and strip BOM/whitespace from string values"""
-        # Clean column names
-        new_cols = {}
-        for c in df.columns:
-            cleaned = _clean_col(str(c))
-            new_cols[c] = cleaned
-        df = df.rename(columns=new_cols)
-
-        # If any column names are duplicates after normalization, make them unique
-        cols = df.columns.tolist()
+        df = df.rename(columns={c: _clean_col(c) for c in df.columns})
+        # Make column names unique
         seen = {}
         unique_cols = []
-        for c in cols:
+        for c in df.columns:
             if c in seen:
                 seen[c] += 1
-                new_name = f"{c}_{seen[c]}"
-                unique_cols.append(new_name)
+                unique_cols.append(f"{c}_{seen[c]}")
             else:
                 seen[c] = 0
                 unique_cols.append(c)
         df.columns = unique_cols
-
-        # Strip strings in object columns
-        for c in df.select_dtypes(include=['object']).columns:
-            try:
-                df[c] = df[c].astype(str).str.strip().replace({'None': None, 'nan': None, 'NaN': None})
-            except Exception:
-                # keep original if conversion fails
-                pass
-
-        DataPreprocessor._debug_print(debug, f"Normalized columns -> {list(df.columns)}")
+        # Strip string values
+        for c in df.select_dtypes(include=['object']):
+            df[c] = df[c].astype(str).str.strip().replace({'None': None, 'nan': None, 'NaN': None})
+        DataPreprocessor._debug_print(debug, f"✅ Normalized columns: {list(df.columns)}")
         return df
 
     @staticmethod
-    def _safe_datetime_parse(date_series: pd.Series) -> pd.Series:
-        """Try multiple formats; fallback to pandas auto-parse"""
-        if date_series is None:
+    def _safe_datetime_parse(series: pd.Series) -> pd.Series:
+        if series is None or series.empty:
             return pd.Series(dtype='datetime64[ns]')
-        if isinstance(date_series, (pd.DatetimeIndex, pd.Series)) and pd.api.types.is_datetime64_any_dtype(date_series):
-            return pd.to_datetime(date_series, errors='coerce')
-
-        # If numeric epoch seconds as strings or numbers
         try:
-            numeric = pd.to_numeric(date_series, errors='coerce')
-            if numeric.notna().sum() > 0 and (numeric.max() > 1e9 or numeric.min() > 1):
-                # likely unix seconds or ms (very noisy heuristic)
-                # try seconds first then ms
-                parsed = pd.to_datetime(numeric, unit='s', errors='coerce')
-                if parsed.notna().sum() / len(parsed) > 0.8:
-                    return parsed
-                parsed = pd.to_datetime(numeric, unit='ms', errors='coerce')
-                if parsed.notna().sum() / len(parsed) > 0.8:
-                    return parsed
+            return pd.to_datetime(series, errors='coerce', infer_datetime_format=True)
         except Exception:
-            pass
-
-        formats_to_try = [
-            '%Y-%m-%d %H:%M:%S',
-            '%Y-%m-%dT%H:%M:%S',
-            '%m/%d/%Y %I:%M:%S %p',
-            '%m/%d/%Y %H:%M:%S',
-            '%d/%m/%Y %H:%M:%S',
-            '%Y-%m-%d %H:%M:%S.%f',
-            '%Y-%m-%dT%H:%M:%S.%f',
-            '%m/%d/%Y %H:%M:%S.%f',
-        ]
-        for fmt in formats_to_try:
-            try:
-                parsed = pd.to_datetime(date_series, format=fmt, errors='coerce')
-                if parsed.notna().sum() / max(1, len(parsed)) > 0.8:
-                    return parsed
-            except Exception:
-                continue
-
-        # Last resort: pandas auto-parse (may warn but will generally work)
-        return pd.to_datetime(date_series, errors='coerce')
+            return pd.Series(dtype='datetime64[ns]')
 
     @staticmethod
     def time_to_seconds(time_str: Any) -> float:
-        """Convert time strings like '1:39.496', '46:41.553', '1:54.168', 'MM:SS' or numeric seconds."""
         if pd.isna(time_str):
             return np.nan
-        s = str(time_str).strip()
-        if s == '' or s.upper() in {'-', 'NULL', 'NONE'}:
-            return np.nan
-
-        # if already numeric
-        try:
-            return float(s)
-        except Exception:
-            pass
-
-        # Remove possible + sign used in gaps
-        s = s.lstrip('+')
-
-        # Patterns:
-        # H:MM:SS.sss, MM:SS.sss, M:SS.sss, MM:SS
+        s = str(time_str).strip().lstrip('+')
+        if ':' not in s:
+            try:
+                return float(s)
+            except Exception:
+                return np.nan
         parts = s.split(':')
         try:
-            if len(parts) == 1:
-                # decimal seconds
-                return float(parts[0])
             if len(parts) == 2:
-                # MM:SS.sss or MM:SS
-                minutes = float(parts[0])
-                seconds = float(parts[1])
-                return minutes * 60.0 + seconds
-            if len(parts) == 3:
-                hours = float(parts[0])
-                minutes = float(parts[1])
-                seconds = float(parts[2])
-                return hours * 3600.0 + minutes * 60.0 + seconds
+                return int(parts[0]) * 60 + float(parts[1])
+            elif len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
         except Exception:
             return np.nan
-
         return np.nan
 
     @staticmethod
     def gap_to_seconds(gap_str: Any) -> float:
-        """Convert gap strings like '+0.234', '+0:00.234', '0.234' -> seconds"""
         if pd.isna(gap_str):
             return np.nan
-        s = str(gap_str).strip()
-        if s == '' or s.upper() in {'-', 'NULL', 'NONE'}:
-            return np.nan
-        # remove leading +
-        s = s.lstrip('+')
-        # if it's a time-like string with colon
-        if ':' in s:
-            return DataPreprocessor.time_to_seconds(s)
-        # try numeric directly
-        try:
-            return float(s)
-        except Exception:
-            return np.nan
+        return DataPreprocessor.time_to_seconds(str(gap_str).strip().lstrip('+'))
 
     @staticmethod
     def race_time_to_seconds(time_str: Any) -> float:
-        """Total race time format often '46:41.553' -> 46*60 + 41.553"""
-        if pd.isna(time_str):
-            return np.nan
-        s = str(time_str).strip()
-        if s == '' or s.upper() in {'-', 'NULL', 'NONE'}:
-            return np.nan
-        return DataPreprocessor.time_to_seconds(s)
+        return DataPreprocessor.time_to_seconds(time_str)
 
     @staticmethod
     def merge_session_data(processed_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
-        """
-        Return dictionary with keys: lap_data, race_data, weather_data, telemetry_data.
-        Missing entries will be empty DataFrames.
-        """
-        out = {}
-        out['lap_data'] = processed_data.get('lap_data', pd.DataFrame()).copy()
-        out['race_data'] = processed_data.get('race_data', pd.DataFrame()).copy()
-        out['weather_data'] = processed_data.get('weather_data', pd.DataFrame()).copy()
-        out['telemetry_data'] = processed_data.get('telemetry_data', pd.DataFrame()).copy()
-        return out
+        return {
+            'lap_data': processed_data.get('lap_data', pd.DataFrame()).copy(),
+            'race_data': processed_data.get('race_data', pd.DataFrame()).copy(),
+            'weather_data': processed_data.get('weather_data', pd.DataFrame()).copy(),
+            'telemetry_data': processed_data.get('telemetry_data', pd.DataFrame()).copy(),
+        }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# import re
+# import pandas as pd
+# import numpy as np
+# from typing import Dict, Any, Optional, Iterable, List
+
+
+# def _clean_col(col: str) -> str:
+#     """Normalize column names: strip BOM/whitespace, uppercase, replace separators with _"""
+#     if not isinstance(col, str):
+#         return col
+#     # remove BOM if present
+#     col = col.lstrip('\ufeff').strip()
+#     # replace multiple non-alphanum with underscore
+#     col = re.sub(r'[^0-9A-Za-z]+', '_', col)
+#     col = re.sub(r'__+', '_', col)
+#     return col.upper()
+
+
+# class DataPreprocessor:
+#     """
+#     Robust preprocessor for lap, race, telemetry and weather datasets.
+#     - Use DataPreprocessor.preprocess_* entrypoints
+#     - Set debug=True to print diagnostics
+#     """
+
+#     # canonical telemetry name mappings
+#     TELEMETRY_MAP = {
+#         'ACCX_CAN': 'LONGITUDINAL_ACCEL',
+#         'ACCY_CAN': 'LATERAL_ACCEL',
+#         'APS': 'THROTTLE_POSITION',
+#         'PBRACE_F': 'BRAKE_PRESSURE_FRONT',  # some datasets have typos, keep mapping flexible
+#         'PBRK_F': 'BRAKE_PRESSURE_FRONT',
+#         'PBRK_R': 'BRAKE_PRESSURE_REAR',
+#         'PBRK_RR': 'BRAKE_PRESSURE_REAR',
+#         'PBRK_R_': 'BRAKE_PRESSURE_REAR',
+#         'PBRKE_R': 'BRAKE_PRESSURE_REAR',
+#         'PBRK_RR': 'BRAKE_PRESSURE_REAR',
+#         'PBRACE_R': 'BRAKE_PRESSURE_REAR',
+#         'PBRK': 'BRAKE_PRESSURE',
+#         'PBRK_FRONT': 'BRAKE_PRESSURE_FRONT',
+#         'PBRK_REAR': 'BRAKE_PRESSURE_REAR',
+#         'GEAR': 'GEAR',
+#         'STEERING_ANGLE': 'STEERING_ANGLE',
+#         'VBOX_LONG_MINUTES': 'VBOX_LONG_MIN',
+#         'VBOX_LAT_MIN': 'VBOX_LAT_MIN',
+#         # Add more if your telemetry keys vary
+#     }
+
+#     @staticmethod
+#     def _debug_print(debug: bool, *args, **kwargs):
+#         if debug:
+#             print(*args, **kwargs)
+
+#     # --------------------
+#     # Public preprocessors
+#     # --------------------
+#     @staticmethod
+#     def preprocess_lap_data(lap_df: Optional[pd.DataFrame], debug: bool = False) -> pd.DataFrame:
+#         if lap_df is None:
+#             DataPreprocessor._debug_print(debug, "⚠️ Lap data is None, returning empty DataFrame")
+#             return pd.DataFrame()
+#         if isinstance(lap_df, pd.Series):
+#             lap_df = lap_df.to_frame().T
+#         if lap_df.empty:
+#             DataPreprocessor._debug_print(debug, "⚠️ Lap data is empty, returning empty DataFrame")
+#             return pd.DataFrame()
+
+#         df = lap_df.copy()
+#         df = DataPreprocessor._normalize_dataframe(df, debug=debug)
+
+#         # common time/sector fields to convert to seconds (if present)
+#         time_columns = [
+#             'LAP_TIME', 'TIME', 'FL_TIME', 'S1', 'S2', 'S3',
+#             'S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS', 'LAP_TIME_SECONDS'
+#         ]
+#         for c in time_columns:
+#             if c in df.columns:
+#                 df[f"{c}_SECONDS"] = df[c].apply(DataPreprocessor.time_to_seconds)
+
+#         # gap columns
+#         for col in ['GAP_FIRST', 'GAP_PREVIOUS', 'GAP']:
+#             if col in df.columns:
+#                 df[f"{col}_SECONDS"] = df[col].apply(DataPreprocessor.gap_to_seconds)
+
+#         # lap number detection
+#         lap_num_candidates = ['LAP_NUMBER', 'LAP', 'LAPNUM', 'FL_LAPNUM']
+#         for cand in lap_num_candidates:
+#             if cand in df.columns and not df[cand].empty:
+#                 df['LAP_NUMBER'] = pd.to_numeric(df[cand], errors='coerce')
+#                 DataPreprocessor._debug_print(debug, f"✅ Found lap number column: {cand}")
+#                 break
+
+#         # driver number detection
+#         num_candidates = ['NUMBER', 'DRIVER_NUMBER', 'DRIVERNO', 'DRIVER_NO']
+#         for cand in num_candidates:
+#             if cand in df.columns:
+#                 df['NUMBER'] = pd.to_numeric(df[cand], errors='coerce')
+#                 DataPreprocessor._debug_print(debug, f"✅ Found driver number column: {cand}")
+#                 break
+
+#         # KPH
+#         if 'KPH' in df.columns:
+#             df['KPH'] = pd.to_numeric(df['KPH'], errors='coerce')
+
+#         # create summary metrics if lap_time present
+#         if 'LAP_TIME_SECONDS' in df.columns:
+#             df['PERFORMANCE_DROP'] = df.groupby('NUMBER')['LAP_TIME_SECONDS'].transform(lambda x: x - x.min())
+#             df['CONSISTENCY'] = df.groupby('NUMBER')['LAP_TIME_SECONDS'].transform('std')
+
+#         # improvements (sometimes are strings)
+#         for inc in ['S1_IMPROVEMENT', 'S2_IMPROVEMENT', 'S3_IMPROVEMENT', 'LAP_IMPROVEMENT']:
+#             if inc in df.columns:
+#                 df[f"{inc}_SECONDS"] = df[inc].apply(DataPreprocessor.time_to_seconds)
+
+#         # numeric cleanups
+#         for c in ['POSITION', 'POS', 'PIC', 'NUMBER', 'LAPS', 'TOTAL_LAPS']:
+#             if c in df.columns:
+#                 df[c] = pd.to_numeric(df[c], errors='coerce')
+
+#         DataPreprocessor._debug_print(debug, f"✅ Processed lap data with {len(df)} rows and columns: {list(df.columns)}")
+#         return df
+
+#     @staticmethod
+#     def preprocess_race_data(race_df: Optional[pd.DataFrame], debug: bool = False) -> pd.DataFrame:
+#         if race_df is None:
+#             DataPreprocessor._debug_print(debug, "⚠️ Race data is None, returning empty DataFrame")
+#             return pd.DataFrame()
+#         if isinstance(race_df, pd.Series):
+#             race_df = race_df.to_frame().T
+#         if race_df.empty:
+#             DataPreprocessor._debug_print(debug, "⚠️ Race data is empty, returning empty DataFrame")
+#             return pd.DataFrame()
+
+#         df = race_df.copy()
+#         df = DataPreprocessor._normalize_dataframe(df, debug=debug)
+
+#         # Position detection with safe checks to avoid ambiguous Series truth values
+#         pos_candidates = ['POSITION', 'POS', 'PIC']
+#         position_found = False
+#         for cand in pos_candidates:
+#             if cand in df.columns:
+#                 col = df[cand]
+#                 # explicit emptiness and 1-d checks
+#                 if not col.empty and (isinstance(col, pd.Series) or hasattr(col, '__len__')):
+#                     try:
+#                         df['POSITION'] = pd.to_numeric(col, errors='coerce')
+#                         position_found = True
+#                         DataPreprocessor._debug_print(debug, f"✅ Using position column: {cand}")
+#                         break
+#                     except Exception as e:
+#                         DataPreprocessor._debug_print(debug, f"❌ Error processing position column {cand}: {e}")
+#                         continue
+
+#         if not position_found:
+#             DataPreprocessor._debug_print(debug, "⚠️ No valid position column found, creating default positions")
+#             if len(df) > 0:
+#                 df['POSITION'] = list(range(1, len(df) + 1))
+#             else:
+#                 df['POSITION'] = pd.Series(dtype='float64')
+
+#         # total time -> seconds
+#         if 'TOTAL_TIME' in df.columns:
+#             df['TOTAL_TIME_SECONDS'] = df['TOTAL_TIME'].apply(DataPreprocessor.race_time_to_seconds)
+
+#         # gap columns safe parse
+#         for col in ['GAP_FIRST', 'GAP_PREVIOUS', 'GAP']:
+#             if col in df.columns:
+#                 try:
+#                     df[f"{col}_SECONDS"] = df[col].apply(DataPreprocessor.gap_to_seconds)
+#                 except Exception as e:
+#                     DataPreprocessor._debug_print(debug, f"❌ Error processing gap column {col}: {e}")
+#                     df[f"{col}_SECONDS"] = np.nan
+
+#         # best lap / fastest lap falls back FL_TIME
+#         if 'BEST_LAP_TIME' in df.columns:
+#             df['BEST_LAP_SECONDS'] = df['BEST_LAP_TIME'].apply(DataPreprocessor.time_to_seconds)
+#         elif 'FL_TIME' in df.columns:
+#             df['BEST_LAP_SECONDS'] = df['FL_TIME'].apply(DataPreprocessor.time_to_seconds)
+
+#         # numeric conversions with safe fallback
+#         for c in ['NUMBER', 'LAPS', 'FL_LAPNUM', 'BEST_LAP_NUM', 'PIC']:
+#             if c in df.columns:
+#                 try:
+#                     df[c] = pd.to_numeric(df[c], errors='coerce')
+#                 except Exception:
+#                     df[c] = np.nan
+
+#         DataPreprocessor._debug_print(debug, f"✅ Processed race data with {len(df)} rows and columns: {list(df.columns)}")
+#         return df
+
+#     @staticmethod
+#     def preprocess_weather_data(weather_df: Optional[pd.DataFrame], debug: bool = False) -> pd.DataFrame:
+#         if weather_df is None:
+#             DataPreprocessor._debug_print(debug, "⚠️ Weather data is None, returning empty DataFrame")
+#             return pd.DataFrame()
+#         if isinstance(weather_df, pd.Series):
+#             weather_df = weather_df.to_frame().T
+#         if weather_df.empty:
+#             DataPreprocessor._debug_print(debug, "⚠️ Weather data is empty, returning empty DataFrame")
+#             return pd.DataFrame()
+
+#         df = weather_df.copy()
+#         df = DataPreprocessor._normalize_dataframe(df, debug=debug)
+
+#         # timestamp columns
+#         ts_candidates = ['TIME_UTC_SECONDS', 'TIME_UTC_STR', 'TIMESTAMP', 'TIME']
+#         parsed = False
+#         for cand in ts_candidates:
+#             if cand in df.columns:
+#                 if cand == 'TIME_UTC_SECONDS':
+#                     try:
+#                         df['timestamp'] = pd.to_datetime(pd.to_numeric(df[cand], errors='coerce'), unit='s', errors='coerce')
+#                         parsed = True
+#                     except Exception:
+#                         parsed = False
+#                 else:
+#                     df['timestamp'] = DataPreprocessor._safe_datetime_parse(df[cand])
+#                     parsed = True
+#                 if parsed:
+#                     DataPreprocessor._debug_print(debug, f"✅ Parsed weather timestamp from {cand}")
+#                     break
+
+#         # numeric weather columns
+#         for c in ['AIR_TEMP', 'TRACK_TEMP', 'HUMIDITY', 'PRESSURE', 'WIND_SPEED', 'WIND_DIRECTION', 'RAIN']:
+#             if c in df.columns:
+#                 df[c] = pd.to_numeric(df[c], errors='coerce')
+
+#         DataPreprocessor._debug_print(debug, f"✅ Processed weather data with {len(df)} rows and columns: {list(df.columns)}")
+#         return df
+
+#     @staticmethod
+#     def preprocess_telemetry_data(telemetry_df: Optional[pd.DataFrame], debug: bool = False) -> pd.DataFrame:
+#         if telemetry_df is None:
+#             DataPreprocessor._debug_print(debug, "⚠️ Telemetry data is None, returning empty DataFrame")
+#             return pd.DataFrame()
+#         if isinstance(telemetry_df, pd.Series):
+#             telemetry_df = telemetry_df.to_frame().T
+#         if telemetry_df.empty:
+#             DataPreprocessor._debug_print(debug, "⚠️ Telemetry data is empty, returning empty DataFrame")
+#             return pd.DataFrame()
+
+#         df = telemetry_df.copy()
+#         df = DataPreprocessor._normalize_dataframe(df, debug=debug)
+
+#         # Some datasets are long format: columns telemetry_name, telemetry_value
+#         # Support both long and wide formats
+#         long_name_cols = [c for c in df.columns if 'TELEMETRY_NAME' in c or 'TELEMETRY' == c]
+#         if {'TELEMETRY_NAME', 'TELEMETRY_VALUE'}.issubset(set(df.columns)):
+#             # pivot long -> wide
+#             try:
+#                 pivoted = df.pivot_table(index=[c for c in df.columns if c not in ['TELEMETRY_NAME', 'TELEMETRY_VALUE']],
+#                                          columns='TELEMETRY_NAME', values='TELEMETRY_VALUE', aggfunc='first').reset_index()
+#                 df = DataPreprocessor._normalize_dataframe(pivoted, debug=debug)
+#                 DataPreprocessor._debug_print(debug, "✅ Telemetry long->wide pivoted")
+#             except Exception as e:
+#                 DataPreprocessor._debug_print(debug, f"⚠️ Could not pivot telemetry long format: {e}")
+
+#         # Rename known telemetry keys to canonical names and coerce numeric
+#         for col in list(df.columns):
+#             if col in DataPreprocessor.TELEMETRY_MAP:
+#                 canonical = DataPreprocessor.TELEMETRY_MAP[col]
+#                 df[canonical] = pd.to_numeric(df[col], errors='coerce')
+
+#         # If telemetry keys appear in lower-case or camelCase, check that too
+#         for col in list(df.columns):
+#             up = col.upper()
+#             if up in DataPreprocessor.TELEMETRY_MAP and up != col:
+#                 canonical = DataPreprocessor.TELEMETRY_MAP[up]
+#                 df[canonical] = pd.to_numeric(df[col], errors='coerce')
+
+#         # Derived telemetry
+#         if 'BRAKE_PRESSURE_FRONT' in df.columns and 'BRAKE_PRESSURE_REAR' in df.columns:
+#             df['TOTAL_BRAKE_PRESSURE'] = (pd.to_numeric(df['BRAKE_PRESSURE_FRONT'], errors='coerce') +
+#                                           pd.to_numeric(df['BRAKE_PRESSURE_REAR'], errors='coerce')) / 2.0
+
+#         if 'LONGITUDINAL_ACCEL' in df.columns and 'LATERAL_ACCEL' in df.columns:
+#             df['TOTAL_ACCEL'] = np.sqrt(
+#                 pd.to_numeric(df['LONGITUDINAL_ACCEL'], errors='coerce')**2 +
+#                 pd.to_numeric(df['LATERAL_ACCEL'], errors='coerce')**2
+#             )
+
+#         # safe timestamp parse if present
+#         for cand in ['TIMESTAMP', 'TIME', 'TIME_UTC_STR', 'TIME_UTC_SECONDS']:
+#             if cand in df.columns:
+#                 if cand == 'TIME_UTC_SECONDS':
+#                     df['timestamp'] = pd.to_datetime(pd.to_numeric(df[cand], errors='coerce'), unit='s', errors='coerce')
+#                 else:
+#                     df['timestamp'] = DataPreprocessor._safe_datetime_parse(df[cand])
+#                 break
+
+#         DataPreprocessor._debug_print(debug, f"✅ Processed telemetry data with {len(df)} rows and columns: {list(df.columns)}")
+#         return df
+
+#     # --------------------
+#     # Helpers
+#     # --------------------
+#     @staticmethod
+#     def _normalize_dataframe(df: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
+#         """Clean column names and strip BOM/whitespace from string values"""
+#         # Clean column names
+#         new_cols = {}
+#         for c in df.columns:
+#             cleaned = _clean_col(str(c))
+#             new_cols[c] = cleaned
+#         df = df.rename(columns=new_cols)
+
+#         # If any column names are duplicates after normalization, make them unique
+#         cols = df.columns.tolist()
+#         seen = {}
+#         unique_cols = []
+#         for c in cols:
+#             if c in seen:
+#                 seen[c] += 1
+#                 new_name = f"{c}_{seen[c]}"
+#                 unique_cols.append(new_name)
+#             else:
+#                 seen[c] = 0
+#                 unique_cols.append(c)
+#         df.columns = unique_cols
+
+#         # Strip strings in object columns
+#         for c in df.select_dtypes(include=['object']).columns:
+#             try:
+#                 df[c] = df[c].astype(str).str.strip().replace({'None': None, 'nan': None, 'NaN': None})
+#             except Exception:
+#                 # keep original if conversion fails
+#                 pass
+
+#         DataPreprocessor._debug_print(debug, f"Normalized columns -> {list(df.columns)}")
+#         return df
+
+#     @staticmethod
+#     def _safe_datetime_parse(date_series: pd.Series) -> pd.Series:
+#         """Try multiple formats; fallback to pandas auto-parse"""
+#         if date_series is None:
+#             return pd.Series(dtype='datetime64[ns]')
+#         if isinstance(date_series, (pd.DatetimeIndex, pd.Series)) and pd.api.types.is_datetime64_any_dtype(date_series):
+#             return pd.to_datetime(date_series, errors='coerce')
+
+#         # If numeric epoch seconds as strings or numbers
+#         try:
+#             numeric = pd.to_numeric(date_series, errors='coerce')
+#             if numeric.notna().sum() > 0 and (numeric.max() > 1e9 or numeric.min() > 1):
+#                 # likely unix seconds or ms (very noisy heuristic)
+#                 # try seconds first then ms
+#                 parsed = pd.to_datetime(numeric, unit='s', errors='coerce')
+#                 if parsed.notna().sum() / len(parsed) > 0.8:
+#                     return parsed
+#                 parsed = pd.to_datetime(numeric, unit='ms', errors='coerce')
+#                 if parsed.notna().sum() / len(parsed) > 0.8:
+#                     return parsed
+#         except Exception:
+#             pass
+
+#         formats_to_try = [
+#             '%Y-%m-%d %H:%M:%S',
+#             '%Y-%m-%dT%H:%M:%S',
+#             '%m/%d/%Y %I:%M:%S %p',
+#             '%m/%d/%Y %H:%M:%S',
+#             '%d/%m/%Y %H:%M:%S',
+#             '%Y-%m-%d %H:%M:%S.%f',
+#             '%Y-%m-%dT%H:%M:%S.%f',
+#             '%m/%d/%Y %H:%M:%S.%f',
+#         ]
+#         for fmt in formats_to_try:
+#             try:
+#                 parsed = pd.to_datetime(date_series, format=fmt, errors='coerce')
+#                 if parsed.notna().sum() / max(1, len(parsed)) > 0.8:
+#                     return parsed
+#             except Exception:
+#                 continue
+
+#         # Last resort: pandas auto-parse (may warn but will generally work)
+#         return pd.to_datetime(date_series, errors='coerce')
+
+#     @staticmethod
+#     def time_to_seconds(time_str: Any) -> float:
+#         """Convert time strings like '1:39.496', '46:41.553', '1:54.168', 'MM:SS' or numeric seconds."""
+#         if pd.isna(time_str):
+#             return np.nan
+#         s = str(time_str).strip()
+#         if s == '' or s.upper() in {'-', 'NULL', 'NONE'}:
+#             return np.nan
+
+#         # if already numeric
+#         try:
+#             return float(s)
+#         except Exception:
+#             pass
+
+#         # Remove possible + sign used in gaps
+#         s = s.lstrip('+')
+
+#         # Patterns:
+#         # H:MM:SS.sss, MM:SS.sss, M:SS.sss, MM:SS
+#         parts = s.split(':')
+#         try:
+#             if len(parts) == 1:
+#                 # decimal seconds
+#                 return float(parts[0])
+#             if len(parts) == 2:
+#                 # MM:SS.sss or MM:SS
+#                 minutes = float(parts[0])
+#                 seconds = float(parts[1])
+#                 return minutes * 60.0 + seconds
+#             if len(parts) == 3:
+#                 hours = float(parts[0])
+#                 minutes = float(parts[1])
+#                 seconds = float(parts[2])
+#                 return hours * 3600.0 + minutes * 60.0 + seconds
+#         except Exception:
+#             return np.nan
+
+#         return np.nan
+
+#     @staticmethod
+#     def gap_to_seconds(gap_str: Any) -> float:
+#         """Convert gap strings like '+0.234', '+0:00.234', '0.234' -> seconds"""
+#         if pd.isna(gap_str):
+#             return np.nan
+#         s = str(gap_str).strip()
+#         if s == '' or s.upper() in {'-', 'NULL', 'NONE'}:
+#             return np.nan
+#         # remove leading +
+#         s = s.lstrip('+')
+#         # if it's a time-like string with colon
+#         if ':' in s:
+#             return DataPreprocessor.time_to_seconds(s)
+#         # try numeric directly
+#         try:
+#             return float(s)
+#         except Exception:
+#             return np.nan
+
+#     @staticmethod
+#     def race_time_to_seconds(time_str: Any) -> float:
+#         """Total race time format often '46:41.553' -> 46*60 + 41.553"""
+#         if pd.isna(time_str):
+#             return np.nan
+#         s = str(time_str).strip()
+#         if s == '' or s.upper() in {'-', 'NULL', 'NONE'}:
+#             return np.nan
+#         return DataPreprocessor.time_to_seconds(s)
+
+#     @staticmethod
+#     def merge_session_data(processed_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+#         """
+#         Return dictionary with keys: lap_data, race_data, weather_data, telemetry_data.
+#         Missing entries will be empty DataFrames.
+#         """
+#         out = {}
+#         out['lap_data'] = processed_data.get('lap_data', pd.DataFrame()).copy()
+#         out['race_data'] = processed_data.get('race_data', pd.DataFrame()).copy()
+#         out['weather_data'] = processed_data.get('weather_data', pd.DataFrame()).copy()
+#         out['telemetry_data'] = processed_data.get('telemetry_data', pd.DataFrame()).copy()
+#         return out
 
 
 
