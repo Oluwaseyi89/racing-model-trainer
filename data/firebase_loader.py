@@ -302,31 +302,31 @@ class FirebaseDataLoader:
         
         return found_files
     
-    # def _load_csv_file(self, zip_file: zipfile.ZipFile, file_path: str) -> pd.DataFrame:
-    #     """Load a single CSV file with multiple encoding attempts"""
-    #     try:
-    #         with zip_file.open(file_path) as f:
-    #             file_content = f.read()
+    def _load_csv_file(self, zip_file: zipfile.ZipFile, file_path: str) -> pd.DataFrame:
+        """Load a single CSV file with multiple encoding attempts"""
+        try:
+            with zip_file.open(file_path) as f:
+                file_content = f.read()
                 
-    #             # Try different separators and encodings
-    #             for sep in [';', ',', '\t']:
-    #                 for encoding in ['utf-8', 'latin-1', 'cp1252']:
-    #                     try:
-    #                         df = pd.read_csv(io.BytesIO(file_content), sep=sep, low_memory=False, encoding=encoding)
-    #                         if len(df.columns) > 1 and len(df) > 0:  # Valid CSV with data
-    #                             print(f"✅ Loaded from {file_path} (sep: {sep}, encoding: {encoding})")
-    #                             return df
-    #                     except UnicodeDecodeError:
-    #                         continue
-    #                     except Exception:
-    #                         continue
+                # Try different separators and encodings
+                for sep in [';', ',', '\t']:
+                    for encoding in ['utf-8', 'latin-1', 'cp1252']:
+                        try:
+                            df = pd.read_csv(io.BytesIO(file_content), sep=sep, low_memory=False, encoding=encoding)
+                            if len(df.columns) > 1 and len(df) > 0:  # Valid CSV with data
+                                print(f"✅ Loaded from {file_path} (sep: {sep}, encoding: {encoding})")
+                                return df
+                        except UnicodeDecodeError:
+                            continue
+                        except Exception:
+                            continue
                 
-    #             print(f"❌ Could not load {file_path} with any separator/encoding")
-    #             return pd.DataFrame()
+                print(f"❌ Could not load {file_path} with any separator/encoding")
+                return pd.DataFrame()
                 
-    #     except Exception as e:
-    #         print(f"⚠️ Failed to load {file_path}: {e}")
-    #         return pd.DataFrame()
+        except Exception as e:
+            print(f"⚠️ Failed to load {file_path}: {e}")
+            return pd.DataFrame()
     
     
     
@@ -334,127 +334,74 @@ class FirebaseDataLoader:
     #------------------------------------------------------------------
     # _load_csv_file improvement
 
-    def _load_csv_file(self, zip_file: zipfile.ZipFile, file_path: str) -> pd.DataFrame:
-        """Load a single CSV file with proper error handling and validation"""
-        try:
-            with zip_file.open(file_path) as f:
-                # Read sample first to detect encoding/separator
-                sample_content = f.read(8192)  # 8KB sample
-                # f.seek(0)  # Reset for full read
+    # def _load_csv_file(self, zip_file: zipfile.ZipFile, file_path: str) -> pd.DataFrame:
+    #     """Load a single CSV file with proper error handling and validation"""
+    #     try:
+    #         with zip_file.open(file_path) as f:
+    #             # Read sample first to detect encoding/separator
+    #             sample_content = f.read(8192)  # 8KB sample
+    #             # f.seek(0)  # Reset for full read
                 
-                # Detect encoding and separator more intelligently
-                detected_sep, detected_encoding = self._detect_csv_format(sample_content)
+    #             # Detect encoding and separator more intelligently
+    #             detected_sep, detected_encoding = self._detect_csv_format(sample_content)
                 
-                if detected_sep and detected_encoding:
-                    df = pd.read_csv(f, sep=detected_sep, encoding=detected_encoding, 
-                                low_memory=False, on_bad_lines='warn')
+    #             if detected_sep and detected_encoding:
+    #                 df = pd.read_csv(f, sep=detected_sep, encoding=detected_encoding, 
+    #                             low_memory=False, on_bad_lines='warn')
                     
-                    if self._validate_dataframe(df, file_path):
-                        print(f"✅ Loaded {file_path} (sep: {detected_sep}, encoding: {detected_encoding})")
-                        return df
+    #                 if self._validate_dataframe(df, file_path):
+    #                     print(f"✅ Loaded {file_path} (sep: {detected_sep}, encoding: {detected_encoding})")
+    #                     return df
                 
-                # Fallback with early termination
-                return self._fallback_load(f, file_path)
+    #             # Fallback with early termination
+    #             return self._fallback_load(f, file_path)
                 
-        except KeyError:
-            raise FileNotFoundError(f"File {file_path} not found in zip")
-        except Exception as e:
-            raise ValueError(f"Failed to load {file_path}: {str(e)}") from e
+    #     except KeyError:
+    #         raise FileNotFoundError(f"File {file_path} not found in zip")
+    #     except Exception as e:
+    #         raise ValueError(f"Failed to load {file_path}: {str(e)}") from e
 
-    def _detect_csv_format(self, sample_content: bytes) -> tuple:
-        """Intelligently detect CSV separator and encoding"""
-        # Use chardet for encoding detection
-        import chardet
-        encoding_result = chardet.detect(sample_content)
+    # def _detect_csv_format(self, sample_content: bytes) -> tuple:
+    #     """Intelligently detect CSV separator and encoding"""
+    #     # Use chardet for encoding detection
+    #     import chardet
+    #     encoding_result = chardet.detect(sample_content)
         
-        # Detect separator from first few lines
-        decoded_sample = sample_content.decode(encoding_result['encoding'] or 'utf-8', errors='ignore')
-        first_line = decoded_sample.split('\n')[0] if '\n' in decoded_sample else decoded_sample
+    #     # Detect separator from first few lines
+    #     decoded_sample = sample_content.decode(encoding_result['encoding'] or 'utf-8', errors='ignore')
+    #     first_line = decoded_sample.split('\n')[0] if '\n' in decoded_sample else decoded_sample
         
-        separators = {';': first_line.count(';'), 
-                    ',': first_line.count(','), 
-                    '\t': first_line.count('\t')}
-        best_sep = max(separators, key=separators.get) if max(separators.values()) > 0 else ','
+    #     separators = {';': first_line.count(';'), 
+    #                 ',': first_line.count(','), 
+    #                 '\t': first_line.count('\t')}
+    #     best_sep = max(separators, key=separators.get) if max(separators.values()) > 0 else ','
         
-        return best_sep, encoding_result['encoding']
+    #     return best_sep, encoding_result['encoding']
 
-    def _validate_dataframe(self, df: pd.DataFrame, file_path: str) -> bool:
-        """Validate DataFrame structure and content"""
-        if df.empty:
-            print(f"⚠️ Empty file: {file_path}")
-            return True  # Empty but valid
+    # def _validate_dataframe(self, df: pd.DataFrame, file_path: str) -> bool:
+    #     """Validate DataFrame structure and content"""
+    #     if df.empty:
+    #         print(f"⚠️ Empty file: {file_path}")
+    #         return True  # Empty but valid
         
-        # Check for reasonable structure
-        if len(df.columns) == 0:
-            print(f"❌ No columns found: {file_path}")
-            return False
+    #     # Check for reasonable structure
+    #     if len(df.columns) == 0:
+    #         print(f"❌ No columns found: {file_path}")
+    #         return False
             
-        # Check for completely null data
-        if df.isnull().all().all():
-            print(f"⚠️ All null data: {file_path}")
+    #     # Check for completely null data
+    #     if df.isnull().all().all():
+    #         print(f"⚠️ All null data: {file_path}")
             
-        return True
+    #     return True
 
 
     # _load_csv_file improvement ends
     #--------------------------------------------------------------------
 
     
-    # def _extract_all_files_from_zip(self, zip_data: bytes) -> Dict[str, pd.DataFrame]:
-    #     """Extract and load ALL CSV files from a zip archive with nested directories"""
-    #     data_frames = {
-    #         'lap_data': pd.DataFrame(),
-    #         'race_data': pd.DataFrame(),
-    #         'weather_data': pd.DataFrame(),
-    #         'telemetry_data': pd.DataFrame()
-    #     }
-        
-    #     try:
-    #         with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as z:
-    #             # Get all files in zip (including nested directories)
-    #             all_files = []
-    #             for file_info in z.infolist():
-    #                 if not file_info.is_dir():
-    #                     all_files.append(file_info.filename)
-                
-    #             print(f"📂 Found {len(all_files)} files in zip")
-                
-    #             # Find ALL CSV files using pattern matching
-    #             found_files = self._find_files_by_patterns(all_files, [])
-                
-    #             # Load ALL files for each data type and concatenate them
-    #             for data_type, file_paths in found_files.items():
-    #                 if not file_paths:
-    #                     print(f"📝 No files found for {data_type}")
-    #                     continue
-                    
-    #                 print(f"🔍 Found {len(file_paths)} files for {data_type}: {file_paths}")
-                    
-    #                 dfs = []
-    #                 for file_path in file_paths:
-    #                     df = self._load_csv_file(z, file_path)
-    #                     if not df.empty:
-    #                         dfs.append(df)
-                    
-    #                 if dfs:
-    #                     # Concatenate all dataframes for this data type
-    #                     combined_df = pd.concat(dfs, ignore_index=True)
-    #                     data_frames[data_type] = combined_df
-    #                     print(f"📊 Combined {len(dfs)} files into {data_type} with {len(combined_df)} rows")
-    #                 else:
-    #                     print(f"❌ No valid data loaded for {data_type}")
-                
-    #     except Exception as e:
-    #         print(f"❌ Failed to process zip file: {e}")
-        
-    #     return data_frames
-
-
-    #-----------------------------------------------------------
-    # _extract_all_files_from_zip Improvement
-
-    def _extract_all_files_from_zip(self, zip_path: str) -> Dict[str, pd.DataFrame]:
-        """Extract and load CSV files with proper memory management and error handling"""
+    def _extract_all_files_from_zip(self, zip_data: bytes) -> Dict[str, pd.DataFrame]:
+        """Extract and load ALL CSV files from a zip archive with nested directories"""
         data_frames = {
             'lap_data': pd.DataFrame(),
             'race_data': pd.DataFrame(),
@@ -462,74 +409,127 @@ class FirebaseDataLoader:
             'telemetry_data': pd.DataFrame()
         }
         
-        processed_files = set()
-        errors = []
-        
         try:
-            with zipfile.ZipFile(zip_path, 'r') as z:
-                # Process files incrementally to manage memory
+            with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as z:
+                # Get all files in zip (including nested directories)
+                all_files = []
                 for file_info in z.infolist():
-                    if file_info.is_dir() or not file_info.filename.lower().endswith('.csv'):
+                    if not file_info.is_dir():
+                        all_files.append(file_info.filename)
+                
+                print(f"📂 Found {len(all_files)} files in zip")
+                
+                # Find ALL CSV files using pattern matching
+                found_files = self._find_files_by_patterns(all_files, [])
+                
+                # Load ALL files for each data type and concatenate them
+                for data_type, file_paths in found_files.items():
+                    if not file_paths:
+                        print(f"📝 No files found for {data_type}")
                         continue
                     
-                    try:
-                        # Determine data type from filename/path
-                        data_type = self._classify_file_type(file_info.filename)
-                        if not data_type:
-                            continue
-                        
-                        # Load single file
-                        df = self._load_csv_file(z, file_info.filename)
-                        if df.empty:
-                            errors.append(f"Empty DataFrame: {file_info.filename}")
-                            continue
-                        
-                        # Validate schema before concatenation
-                        if not self._validate_schema_compatibility(df, data_type):
-                            errors.append(f"Schema mismatch: {file_info.filename}")
-                            continue
-                        
-                        # Merge with existing data
-                        data_frames[data_type] = self._merge_dataframes(
-                            data_frames[data_type], df, data_type
-                        )
-                        processed_files.add(file_info.filename)
-                        
-                    except Exception as e:
-                        errors.append(f"Failed {file_info.filename}: {str(e)}")
-                        continue
+                    print(f"🔍 Found {len(file_paths)} files for {data_type}: {file_paths}")
+                    
+                    dfs = []
+                    for file_path in file_paths:
+                        df = self._load_csv_file(z, file_path)
+                        if not df.empty:
+                            dfs.append(df)
+                    
+                    if dfs:
+                        # Concatenate all dataframes for this data type
+                        combined_df = pd.concat(dfs, ignore_index=True)
+                        data_frames[data_type] = combined_df
+                        print(f"📊 Combined {len(dfs)} files into {data_type} with {len(combined_df)} rows")
+                    else:
+                        print(f"❌ No valid data loaded for {data_type}")
                 
-        except zipfile.BadZipFile as e:
-            raise ValueError(f"Invalid zip file: {str(e)}") from e
         except Exception as e:
-            raise IOError(f"Zip processing failed: {str(e)}") from e
+            print(f"❌ Failed to process zip file: {e}")
         
-        # Return results with metadata
-        result = {
-            'data_frames': data_frames,
-            'processed_files': list(processed_files),
-            'errors': errors,
-            'success': len(errors) == 0
-        }
-        
-        return result
+        return data_frames
 
-    def _merge_dataframes(self, existing_df: pd.DataFrame, new_df: pd.DataFrame, data_type: str) -> pd.DataFrame:
-        """Safely merge dataframes with schema validation"""
-        if existing_df.empty:
-            return new_df
+
+    #-----------------------------------------------------------
+    # _extract_all_files_from_zip Improvement
+
+    # def _extract_all_files_from_zip(self, zip_path: str) -> Dict[str, pd.DataFrame]:
+    #     """Extract and load CSV files with proper memory management and error handling"""
+    #     data_frames = {
+    #         'lap_data': pd.DataFrame(),
+    #         'race_data': pd.DataFrame(),
+    #         'weather_data': pd.DataFrame(),
+    #         'telemetry_data': pd.DataFrame()
+    #     }
         
-        # Check for column compatibility
-        common_cols = set(existing_df.columns) & set(new_df.columns)
-        if not common_cols:
-            raise ValueError(f"No common columns for {data_type}")
+    #     processed_files = set()
+    #     errors = []
         
-        # Ensure consistent dtypes for common columns
-        for col in common_cols:
-            if existing_df[col].dtype != new_df[col].dtype:
-                new_df[col] = new_df[col].astype(existing_df[col].dtype)
+    #     try:
+    #         with zipfile.ZipFile(zip_path, 'r') as z:
+    #             # Process files incrementally to manage memory
+    #             for file_info in z.infolist():
+    #                 if file_info.is_dir() or not file_info.filename.lower().endswith('.csv'):
+    #                     continue
+                    
+    #                 try:
+    #                     # Determine data type from filename/path
+    #                     data_type = self._classify_file_type(file_info.filename)
+    #                     if not data_type:
+    #                         continue
+                        
+    #                     # Load single file
+    #                     df = self._load_csv_file(z, file_info.filename)
+    #                     if df.empty:
+    #                         errors.append(f"Empty DataFrame: {file_info.filename}")
+    #                         continue
+                        
+    #                     # Validate schema before concatenation
+    #                     if not self._validate_schema_compatibility(df, data_type):
+    #                         errors.append(f"Schema mismatch: {file_info.filename}")
+    #                         continue
+                        
+    #                     # Merge with existing data
+    #                     data_frames[data_type] = self._merge_dataframes(
+    #                         data_frames[data_type], df, data_type
+    #                     )
+    #                     processed_files.add(file_info.filename)
+                        
+    #                 except Exception as e:
+    #                     errors.append(f"Failed {file_info.filename}: {str(e)}")
+    #                     continue
+                
+    #     except zipfile.BadZipFile as e:
+    #         raise ValueError(f"Invalid zip file: {str(e)}") from e
+    #     except Exception as e:
+    #         raise IOError(f"Zip processing failed: {str(e)}") from e
         
-        return pd.concat([existing_df, new_df], ignore_index=True, sort=False)
+    #     # Return results with metadata
+    #     result = {
+    #         'data_frames': data_frames,
+    #         'processed_files': list(processed_files),
+    #         'errors': errors,
+    #         'success': len(errors) == 0
+    #     }
+        
+    #     return result
+
+    # def _merge_dataframes(self, existing_df: pd.DataFrame, new_df: pd.DataFrame, data_type: str) -> pd.DataFrame:
+    #     """Safely merge dataframes with schema validation"""
+    #     if existing_df.empty:
+    #         return new_df
+        
+    #     # Check for column compatibility
+    #     common_cols = set(existing_df.columns) & set(new_df.columns)
+    #     if not common_cols:
+    #         raise ValueError(f"No common columns for {data_type}")
+        
+    #     # Ensure consistent dtypes for common columns
+    #     for col in common_cols:
+    #         if existing_df[col].dtype != new_df[col].dtype:
+    #             new_df[col] = new_df[col].astype(existing_df[col].dtype)
+        
+    #     return pd.concat([existing_df, new_df], ignore_index=True, sort=False)
 
     # _extract_all_files_from_zip Improvement ends here
     #-----------------------------------------------------------------
@@ -545,97 +545,39 @@ class FirebaseDataLoader:
         blob = self.bucket.blob(blob_path)
         return blob.exists()
     
-    # def load_track_data(self, track_name: str) -> Dict[str, pd.DataFrame]:
-    #     """Load track data - only download if not already cached"""
-    #     try:
-    #         # Check for cached data first
-    #         if self._check_track_data_cached(track_name):
-    #             cache_file = f'/kaggle/working/{track_name}_cached.pkl'
-    #             print(f"📂 Loading cached data for {track_name}")
-    #             with open(cache_file, 'rb') as f:
-    #                 return joblib.load(f)
-            
-    #         # Check if track exists in Firebase before downloading
-    #         if not self._check_track_exists_firebase(track_name):
-    #             print(f"❌ Track {track_name} not found in Firebase Storage")
-    #             return self._return_empty_data()
-            
-    #         # Download only if not cached
-    #         blob_path = f"datasets/{track_name}.zip"
-    #         print(f"📥 Downloading missing dataset: {blob_path}")
-            
-    #         blob = self.bucket.blob(blob_path)
-            
-    #         # Download with timeout protection
-    #         try:
-    #             zip_data = blob.download_as_bytes(timeout=300)  # 5-minute timeout
-    #             print(f"✅ Downloaded {track_name}.zip ({len(zip_data)} bytes)")
-    #         except Exception as e:
-    #             print(f"⏰ Download timeout for {track_name}: {e}")
-    #             return self._return_empty_data()
-            
-    #         # Extract and load files
-    #         track_data = self._extract_all_files_from_zip(zip_data)
-            
-    #         # Cache immediately to prevent data loss on kernel restart
-    #         try:
-    #             cache_file = f'/kaggle/working/{track_name}_cached.pkl'
-    #             with open(cache_file, 'wb') as f:
-    #                 joblib.dump(track_data, f)
-    #             print(f"💾 Cached {track_name} data for future sessions")
-    #         except Exception as e:
-    #             print(f"⚠️ Could not cache {track_name}: {e}")
-            
-    #         # Report what was loaded
-    #         loaded_count = sum(1 for df in track_data.values() if not df.empty)
-    #         print(f"📊 Loaded {loaded_count} data types for {track_name}")
-            
-    #         return track_data
-            
-    #     except Exception as e:
-    #         print(f"❌ Failed to load {track_name}: {e}")
-    #         return self._return_empty_data()
-
-
-    #--------------------------------------------------------------
-    # load_track_data Improvement
-
     def load_track_data(self, track_name: str) -> Dict[str, pd.DataFrame]:
         """Load track data - only download if not already cached"""
         try:
-            # Check for cached data first (ORIGINAL LOGIC PRESERVED)
+            # Check for cached data first
             if self._check_track_data_cached(track_name):
                 cache_file = f'/kaggle/working/{track_name}_cached.pkl'
                 print(f"📂 Loading cached data for {track_name}")
                 with open(cache_file, 'rb') as f:
-                    cached_data = joblib.load(f)
-                    # Add validation before returning cached data
-                    if self._is_valid_cached_data(cached_data):
-                        return cached_data
-                    else:
-                        print("⚠️ Cached data invalid, re-downloading")
-                        # Remove corrupted cache
-                        os.remove(cache_file)
+                    return joblib.load(f)
             
-            # Original logic continues exactly as before...
+            # Check if track exists in Firebase before downloading
             if not self._check_track_exists_firebase(track_name):
                 print(f"❌ Track {track_name} not found in Firebase Storage")
                 return self._return_empty_data()
             
-            # Download with retry (minimal addition)
-            zip_data = self._download_with_retry(track_name)
-            if zip_data is None:
+            # Download only if not cached
+            blob_path = f"datasets/{track_name}.zip"
+            print(f"📥 Downloading missing dataset: {blob_path}")
+            
+            blob = self.bucket.blob(blob_path)
+            
+            # Download with timeout protection
+            try:
+                zip_data = blob.download_as_bytes(timeout=300)  # 5-minute timeout
+                print(f"✅ Downloaded {track_name}.zip ({len(zip_data)} bytes)")
+            except Exception as e:
+                print(f"⏰ Download timeout for {track_name}: {e}")
                 return self._return_empty_data()
             
-            # Extract files (ORIGINAL)
+            # Extract and load files
             track_data = self._extract_all_files_from_zip(zip_data)
             
-            # Validate before caching (minimal addition)
-            if not any(not df.empty for df in track_data.values()):
-                print(f"⚠️ No valid data extracted, skipping cache for {track_name}")
-                return track_data  # Return empty but don't cache
-            
-            # Cache immediately (ORIGINAL LOGIC PRESERVED)
+            # Cache immediately to prevent data loss on kernel restart
             try:
                 cache_file = f'/kaggle/working/{track_name}_cached.pkl'
                 with open(cache_file, 'wb') as f:
@@ -644,8 +586,9 @@ class FirebaseDataLoader:
             except Exception as e:
                 print(f"⚠️ Could not cache {track_name}: {e}")
             
-            # Clean up memory
-            del zip_data
+            # Report what was loaded
+            loaded_count = sum(1 for df in track_data.values() if not df.empty)
+            print(f"📊 Loaded {loaded_count} data types for {track_name}")
             
             return track_data
             
@@ -653,20 +596,77 @@ class FirebaseDataLoader:
             print(f"❌ Failed to load {track_name}: {e}")
             return self._return_empty_data()
 
-    def _download_with_retry(self, track_name: str, max_retries: int = 2) -> Optional[bytes]:
-        """Minimal retry logic without changing main flow"""
-        blob_path = f"datasets/{track_name}.zip"
+
+    #--------------------------------------------------------------
+    # load_track_data Improvement
+
+    # def load_track_data(self, track_name: str) -> Dict[str, pd.DataFrame]:
+    #     """Load track data - only download if not already cached"""
+    #     try:
+    #         # Check for cached data first (ORIGINAL LOGIC PRESERVED)
+    #         if self._check_track_data_cached(track_name):
+    #             cache_file = f'/kaggle/working/{track_name}_cached.pkl'
+    #             print(f"📂 Loading cached data for {track_name}")
+    #             with open(cache_file, 'rb') as f:
+    #                 cached_data = joblib.load(f)
+    #                 # Add validation before returning cached data
+    #                 if self._is_valid_cached_data(cached_data):
+    #                     return cached_data
+    #                 else:
+    #                     print("⚠️ Cached data invalid, re-downloading")
+    #                     # Remove corrupted cache
+    #                     os.remove(cache_file)
+            
+    #         # Original logic continues exactly as before...
+    #         if not self._check_track_exists_firebase(track_name):
+    #             print(f"❌ Track {track_name} not found in Firebase Storage")
+    #             return self._return_empty_data()
+            
+    #         # Download with retry (minimal addition)
+    #         zip_data = self._download_with_retry(track_name)
+    #         if zip_data is None:
+    #             return self._return_empty_data()
+            
+    #         # Extract files (ORIGINAL)
+    #         track_data = self._extract_all_files_from_zip(zip_data)
+            
+    #         # Validate before caching (minimal addition)
+    #         if not any(not df.empty for df in track_data.values()):
+    #             print(f"⚠️ No valid data extracted, skipping cache for {track_name}")
+    #             return track_data  # Return empty but don't cache
+            
+    #         # Cache immediately (ORIGINAL LOGIC PRESERVED)
+    #         try:
+    #             cache_file = f'/kaggle/working/{track_name}_cached.pkl'
+    #             with open(cache_file, 'wb') as f:
+    #                 joblib.dump(track_data, f)
+    #             print(f"💾 Cached {track_name} data for future sessions")
+    #         except Exception as e:
+    #             print(f"⚠️ Could not cache {track_name}: {e}")
+            
+    #         # Clean up memory
+    #         del zip_data
+            
+    #         return track_data
+            
+    #     except Exception as e:
+    #         print(f"❌ Failed to load {track_name}: {e}")
+    #         return self._return_empty_data()
+
+    # def _download_with_retry(self, track_name: str, max_retries: int = 2) -> Optional[bytes]:
+    #     """Minimal retry logic without changing main flow"""
+    #     blob_path = f"datasets/{track_name}.zip"
         
-        for attempt in range(max_retries):
-            try:
-                blob = self.bucket.blob(blob_path)
-                return blob.download_as_bytes(timeout=300)
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    print(f"⏰ Download timeout for {track_name}: {e}")
-                    return None
-                print(f"🔄 Retry {attempt + 1} for {track_name}")
-                time.sleep(1)
+    #     for attempt in range(max_retries):
+    #         try:
+    #             blob = self.bucket.blob(blob_path)
+    #             return blob.download_as_bytes(timeout=300)
+    #         except Exception as e:
+    #             if attempt == max_retries - 1:
+    #                 print(f"⏰ Download timeout for {track_name}: {e}")
+    #                 return None
+    #             print(f"🔄 Retry {attempt + 1} for {track_name}")
+    #             time.sleep(1)
 
 
     # load-track_data Improvement ends
