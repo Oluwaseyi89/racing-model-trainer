@@ -340,7 +340,7 @@ class FirebaseDataLoader:
             with zip_file.open(file_path) as f:
                 # Read sample first to detect encoding/separator
                 sample_content = f.read(8192)  # 8KB sample
-                f.seek(0)  # Reset for full read
+                # f.seek(0)  # Reset for full read
                 
                 # Detect encoding and separator more intelligently
                 detected_sep, detected_encoding = self._detect_csv_format(sample_content)
