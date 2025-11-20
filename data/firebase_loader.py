@@ -278,16 +278,45 @@ class FirebaseDataLoader:
             'weather_data': pd.DataFrame()
         }
 
+    # def list_available_tracks(self) -> List[str]:
+    #     """List all available tracks in dataset_files folder"""
+    #     tracks = set()
+    #     try:
+    #         blobs = self.bucket.list_blobs(prefix="dataset_files/")
+    #         for blob in blobs:
+    #             if blob.name.endswith('.csv'):
+    #                 # Extract track name from filename (e.g., "dataset_files/barber_pit_data.csv" -> "barber")
+    #                 filename = os.path.basename(blob.name)
+    #                 track_name = filename.split('_')[0]  # Get part before first underscore
+    #                 if track_name:
+    #                     tracks.add(track_name)
+            
+    #         print(f"📦 Found {len(tracks)} tracks: {sorted(list(tracks))}")
+    #         return sorted(list(tracks))
+            
+    #     except Exception as e:
+    #         print(f"❌ Failed to list tracks: {e}")
+    #         return []
+
     def list_available_tracks(self) -> List[str]:
         """List all available tracks in dataset_files folder"""
         tracks = set()
         try:
             blobs = self.bucket.list_blobs(prefix="dataset_files/")
             for blob in blobs:
-                if blob.name.endswith('.csv') or blob.name.endswith('.CSV'):
-                    # Extract track name from filename (e.g., "dataset_files/barber_pit_data.csv" -> "barber")
+                if blob.name.endswith('.csv'):
+                    # Extract track name from filename (e.g., "dataset_files/road_america_pit_data.csv" -> "road_america")
                     filename = os.path.basename(blob.name)
-                    track_name = filename.split('_')[0]  # Get part before first underscore
+                    # Remove file extension and split by underscore
+                    base_name = filename.replace('.csv', '')
+                    parts = base_name.split('_')
+                    
+                    # Handle special case for road_america
+                    if len(parts) >= 2 and parts[0] == 'road' and parts[1] == 'america':
+                        track_name = 'road_america'
+                    else:
+                        track_name = parts[0]  # Default to first part for simple names
+                    
                     if track_name:
                         tracks.add(track_name)
             
