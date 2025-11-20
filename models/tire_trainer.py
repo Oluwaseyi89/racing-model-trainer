@@ -1,307 +1,3 @@
-# import pandas as pd
-# import numpy as np
-# from sklearn.ensemble import RandomForestRegressor
-# from sklearn.model_selection import train_test_split
-# from sklearn.preprocessing import StandardScaler
-# from sklearn.multioutput import MultiOutputRegressor
-# import joblib
-
-
-# class TireModelTrainer:
-#     def __init__(self):
-#         self.model = MultiOutputRegressor(
-#             RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-#         )
-#         self.scaler = StandardScaler()
-#         self.feature_columns = []
-#         self.target_columns = ['degradation_s1', 'degradation_s2', 'degradation_s3', 'grip_loss_rate']
-
-#     # ---------------------------
-#     # TRAINING ENTRY POINT
-#     # ---------------------------
-#     def train(self, lap_data: pd.DataFrame, telemetry_data: pd.DataFrame, weather_data: pd.DataFrame) -> dict:
-#         # Fill missing minimal data if any dataset is empty
-#         if lap_data.empty or telemetry_data.empty or weather_data.empty:
-#             lap_data, telemetry_data, weather_data = self._fabricate_minimal_data()
-
-#         # Extract features and targets
-#         features_df, targets_df = self._extract_tire_features(lap_data, telemetry_data, weather_data)
-
-#         if features_df.empty or targets_df.empty:
-#             return {'error': 'No valid tire features extracted'}
-
-#         # Ensure numeric and consistent types
-#         features_df = features_df.apply(pd.to_numeric, errors='coerce').fillna(0.0)
-#         targets_df = targets_df.apply(pd.to_numeric, errors='coerce').fillna(0.01)
-
-#         # Remove rows with any remaining NaNs
-#         valid_mask = ~features_df.isna().any(axis=1) & ~targets_df.isna().any(axis=1)
-#         X = features_df[valid_mask]
-#         y = targets_df[valid_mask]
-
-#         if len(X) < 20:
-#             return {'error': f'Insufficient training samples: {len(X)}'}
-
-#         # Scale features
-#         X_scaled = self.scaler.fit_transform(X)
-#         self.feature_columns = X.columns.tolist()
-
-#         try:
-#             X_train, X_test, y_train, y_test = train_test_split(
-#                 X_scaled, y, test_size=0.2, random_state=42
-#             )
-#             self.model.fit(X_train, y_train)
-#             train_score = self.model.score(X_train, y_train)
-#             test_score = self.model.score(X_test, y_test)
-#             # Aggregate feature importance safely
-#             avg_feature_importance = np.mean(
-#                 [est.feature_importances_ for est in self.model.estimators_], axis=0
-#             )
-#             feature_importance = dict(zip(self.feature_columns, avg_feature_importance))
-#         except Exception as e:
-#             return {'error': f'Model training failed: {e}'}
-
-#         return {
-#             'model': self,
-#             'features': self.feature_columns,
-#             'targets': self.target_columns,
-#             'train_score': train_score,
-#             'test_score': test_score,
-#             'feature_importance': feature_importance,
-#             'training_samples': len(X)
-#         }
-
-#     # ---------------------------
-#     # FEATURE EXTRACTION
-#     # ---------------------------
-#     def _extract_tire_features(self, lap_data, telemetry_data, weather_data):
-#         features_list, targets_list = [], []
-
-#         for (car_number, session), car_laps in lap_data.groupby(['NUMBER', 'meta_session']):
-#             car_laps = car_laps.sort_values('LAP_NUMBER')
-#             if len(car_laps) < 8:
-#                 car_laps = self._fabricate_car_laps(car_number, session, 8)
-
-#             car_telemetry = telemetry_data[
-#                 (telemetry_data['vehicle_number'] == car_number) &
-#                 (telemetry_data['meta_session'] == session)
-#             ] if not telemetry_data.empty else pd.DataFrame()
-
-#             session_weather = weather_data[
-#                 weather_data['meta_session'] == session
-#             ] if not weather_data.empty else pd.DataFrame()
-
-#             stint_features, stint_targets = self._analyze_stint_performance(car_laps, car_telemetry, session_weather)
-#             if not stint_features.empty and not stint_targets.empty:
-#                 features_list.append(stint_features)
-#                 targets_list.append(stint_targets)
-
-#         features_df = pd.concat(features_list, ignore_index=True) if features_list else pd.DataFrame()
-#         targets_df = pd.concat(targets_list, ignore_index=True) if targets_list else pd.DataFrame()
-#         return features_df, targets_df
-
-#     def _analyze_stint_performance(self, car_laps, telemetry_data, weather_data):
-#         features, targets = [], []
-#         window_size = 5
-
-#         for start in range(0, len(car_laps) - window_size):
-#             end = start + window_size
-#             stint_laps = car_laps.iloc[start:end]
-
-#             deg_metrics = self._calculate_degradation_metrics(stint_laps)
-#             cond_factors = self._calculate_condition_factors(stint_laps, weather_data)
-#             driving_factors = self._calculate_driving_factors(stint_laps, telemetry_data)
-#             stint_features = {**deg_metrics, **cond_factors, **driving_factors}
-
-#             if end + window_size <= len(car_laps):
-#                 next_stint = car_laps.iloc[end:end + window_size]
-#                 deg_targets = self._calculate_degradation_targets(stint_laps, next_stint)
-#                 features.append(pd.DataFrame([stint_features]))
-#                 targets.append(pd.DataFrame([deg_targets]))
-
-#         features_df = pd.concat(features, ignore_index=True) if features else pd.DataFrame()
-#         targets_df = pd.concat(targets, ignore_index=True) if targets else pd.DataFrame()
-#         return features_df, targets_df
-
-#     # ---------------------------
-#     # METRIC CALCULATIONS
-#     # ---------------------------
-#     def _calculate_degradation_metrics(self, stint_laps):
-#         metrics = {}
-#         lap_times = stint_laps.get('LAP_TIME_SECONDS', pd.Series([60]*len(stint_laps))).values
-#         lap_numbers = stint_laps.get('LAP_NUMBER', pd.Series(range(len(stint_laps)))).values
-
-#         slope, r2 = self._linear_trend_analysis(lap_numbers, lap_times)
-#         metrics['lap_time_slope'] = slope
-#         metrics['lap_time_consistency'] = r2
-
-#         for i, sector in enumerate(['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'], 1):
-#             sector_vals = stint_laps.get(sector, pd.Series([60]*len(stint_laps))).values
-#             sector_slope, _ = self._linear_trend_analysis(lap_numbers, sector_vals)
-#             metrics[f'sector_{i}_slope'] = sector_slope
-
-#         metrics['lap_time_variance'] = np.var(lap_times)
-#         metrics['best_to_worst_ratio'] = np.min(lap_times) / np.max(lap_times)
-#         return metrics
-
-#     def _calculate_condition_factors(self, stint_laps, weather_data):
-#         factors = {}
-#         if not weather_data.empty:
-#             stint_start, stint_end = stint_laps['timestamp'].min(), stint_laps['timestamp'].max()
-#             stint_weather = weather_data[
-#                 (weather_data['timestamp'] >= stint_start) & (weather_data['timestamp'] <= stint_end)
-#             ]
-#             factors['avg_track_temp'] = stint_weather['TRACK_TEMP'].mean() if not stint_weather.empty else 35.0
-#             factors['track_temp_range'] = (stint_weather['TRACK_TEMP'].max() - stint_weather['TRACK_TEMP'].min()) if not stint_weather.empty else 5.0
-#             factors['avg_air_temp'] = stint_weather['AIR_TEMP'].mean() if not stint_weather.empty else 25.0
-#         else:
-#             factors['avg_track_temp'] = 35.0
-#             factors['track_temp_range'] = 5.0
-#             factors['avg_air_temp'] = 25.0
-
-#         track_name = stint_laps.get('meta_event', pd.Series(['unknown'])).iloc[0]
-#         factors['track_abrasiveness'] = self._get_track_abrasiveness(track_name)
-#         return factors
-
-#     def _calculate_driving_factors(self, stint_laps, telemetry_data):
-#         factors = {}
-#         if not telemetry_data.empty:
-#             stint_telemetry = telemetry_data[
-#                 telemetry_data['lap'].between(stint_laps['LAP_NUMBER'].min(), stint_laps['LAP_NUMBER'].max())
-#             ]
-#             factors['avg_lateral_g'] = stint_telemetry.get('accy_can', pd.Series([0.5])).abs().mean()
-#             factors['avg_brake_pressure'] = ((stint_telemetry.get('pbrake_f', pd.Series([50])) +
-#                                              stint_telemetry.get('pbrake_r', pd.Series([50]))) / 2).mean()
-#             factors['avg_throttle_usage'] = stint_telemetry.get('aps', pd.Series([60])).mean()
-#             factors['steering_variance'] = stint_telemetry.get('Steering_Angle', pd.Series([10])).var()
-#         else:
-#             factors['avg_lateral_g'] = 0.5
-#             factors['avg_brake_pressure'] = 50.0
-#             factors['avg_throttle_usage'] = 60.0
-#             factors['steering_variance'] = 10.0
-
-#         factors['stint_length'] = len(stint_laps)
-#         factors['cumulative_laps'] = stint_laps.get('LAP_NUMBER', pd.Series([0])).max()
-#         return factors
-
-#     def _calculate_degradation_targets(self, current_stint, next_stint):
-#         targets = {}
-#         for i, sector in enumerate(['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'], 1):
-#             current_avg = current_stint.get(sector, pd.Series([60])).mean()
-#             next_avg = next_stint.get(sector, pd.Series([60])).mean()
-#             targets[f'degradation_s{i}'] = max(0.001, min(0.5, (next_avg - current_avg) / len(next_stint)))
-
-#         curr_avg_time = current_stint.get('LAP_TIME_SECONDS', pd.Series([60])).mean()
-#         next_avg_time = next_stint.get('LAP_TIME_SECONDS', pd.Series([60])).mean()
-#         targets['grip_loss_rate'] = max(0.001, min(1.0, (next_avg_time - curr_avg_time) / len(next_stint)))
-#         return targets
-
-#     def _linear_trend_analysis(self, x, y):
-#         if len(x) < 2:
-#             return 0.0, 0.0
-#         try:
-#             slope = np.polyfit(x, y, 1)[0]
-#             r2 = np.corrcoef(x, y)[0, 1] ** 2
-#             return slope, r2
-#         except:
-#             return 0.0, 0.0
-
-#     def _get_track_abrasiveness(self, track_name):
-#         abrasiveness_map = {'sebring': 0.9, 'barber': 0.8, 'sonoma': 0.7,
-#                             'cota': 0.6, 'road-america': 0.5, 'vir': 0.6}
-#         return abrasiveness_map.get(track_name.lower(), 0.7)
-
-#     # ---------------------------
-#     # PREDICTION
-#     # ---------------------------
-#     def predict_degradation(self, features: dict):
-#         try:
-#             vec = np.array([features.get(col, 0) for col in self.feature_columns]).reshape(1, -1)
-#             scaled = self.scaler.transform(vec)
-#             preds = self.model.predict(scaled)[0]
-#             return dict(zip(self.target_columns, preds))
-#         except:
-#             return self._fallback_degradation(features)
-
-#     def _fallback_degradation(self, features: dict):
-#         return {'degradation_s1': 0.05, 'degradation_s2': 0.05, 'degradation_s3': 0.05, 'grip_loss_rate': 0.1}
-
-#     def estimate_optimal_stint_length(self, features: dict, threshold=0.2):
-#         rates = self.predict_degradation(features)
-#         avg_deg = np.mean([rates['degradation_s1'], rates['degradation_s2'], rates['degradation_s3']])
-#         return max(5, min(30, int(threshold / avg_deg))) if avg_deg > 0 else 15
-
-#     # ---------------------------
-#     # SYNTHETIC DATA HELPERS
-#     # ---------------------------
-#     def _fabricate_minimal_data(self):
-#         lap_data = pd.concat([self._fabricate_car_laps(v, 'session1', 10) for v in range(1, 3)], ignore_index=True)
-#         telemetry_data = pd.concat([self._fabricate_car_telemetry(v, 'session1', 10) for v in range(1, 3)], ignore_index=True)
-#         weather_data = pd.DataFrame([{'meta_session': 'session1', 'timestamp': pd.Timestamp.now(),
-#                                       'TRACK_TEMP': 35.0, 'AIR_TEMP': 25.0}])
-#         return lap_data, telemetry_data, weather_data
-
-#     def _fabricate_car_laps(self, vehicle_num, session, n_laps):
-#         return pd.DataFrame({
-#             'NUMBER': vehicle_num,
-#             'meta_session': session,
-#             'LAP_NUMBER': np.arange(1, n_laps+1),
-#             'LAP_TIME_SECONDS': np.random.uniform(55, 65, n_laps),
-#             'S1_SECONDS': np.random.uniform(18, 22, n_laps),
-#             'S2_SECONDS': np.random.uniform(18, 22, n_laps),
-#             'S3_SECONDS': np.random.uniform(18, 22, n_laps),
-#             'timestamp': pd.date_range('2025-01-01', periods=n_laps)
-#         })
-
-#     def _fabricate_car_telemetry(self, vehicle_num, session, n_laps):
-#         return pd.DataFrame({
-#             'vehicle_number': vehicle_num,
-#             'meta_session': session,
-#             'lap': np.repeat(np.arange(1, n_laps+1), 10),
-#             'aps': np.random.uniform(30, 80, n_laps*10),
-#             'pbrake_f': np.random.uniform(0, 50, n_laps*10),
-#             'pbrake_r': np.random.uniform(0, 50, n_laps*10),
-#             'accy_can': np.random.uniform(-1, 1, n_laps*10),
-#             'Steering_Angle': np.random.uniform(-15, 15, n_laps*10)
-#         })
-
-#     # ---------------------------
-#     # MODEL SERIALIZATION
-#     # ---------------------------
-#     def save_model(self, filepath):
-#         joblib.dump({
-#             'model': self.model,
-#             'scaler': self.scaler,
-#             'feature_columns': self.feature_columns,
-#             'target_columns': self.target_columns
-#         }, filepath)
-
-#     def load_model(self, filepath):
-#         data = joblib.load(filepath)
-#         self.model = data['model']
-#         self.scaler = data['scaler']
-#         self.feature_columns = data['feature_columns']
-#         self.target_columns = data['target_columns']
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
@@ -309,7 +5,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.multioutput import MultiOutputRegressor
 import joblib
-
+from typing import Dict, List, Tuple
 
 class TireModelTrainer:
     def __init__(self):
@@ -319,252 +15,419 @@ class TireModelTrainer:
         self.scaler = StandardScaler()
         self.feature_columns = []
         self.target_columns = ['degradation_s1', 'degradation_s2', 'degradation_s3', 'grip_loss_rate']
+        
+        # Updated to match EXACT column names from FirebaseDataLoader schemas
+        self.required_pit_cols = ['NUMBER', 'DRIVER_NUMBER', 'LAP_NUMBER', 'LAP_TIME', 'LAP_IMPROVEMENT', 'CROSSING_FINISH_LINE_IN_PIT', 'S1', 'S1_IMPROVEMENT', 'S2', 'S2_IMPROVEMENT', 'S3', 'S3_IMPROVEMENT', 'KPH', 'ELAPSED', 'HOUR', 'S1_LARGE', 'S2_LARGE', 'S3_LARGE', 'TOP_SPEED', 'PIT_TIME', 'CLASS', 'GROUP', 'MANUFACTURER', 'FLAG_AT_FL', 'S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS', 'IM1a_time', 'IM1a_elapsed', 'IM1_time', 'IM1_elapsed', 'IM2a_time', 'IM2a_elapsed', 'IM2_time', 'IM2_elapsed', 'IM3a_time', 'IM3a_elapsed', 'FL_time', 'FL_elapsed']
+        self.required_telemetry_cols = ['timestamp', 'vehicle_id', 'lap', 'outing', 'meta_session', 'accx_can', 'accy_can', 'gear', 'speed']
+        self.required_weather_cols = ['TIME_UTC_SECONDS', 'TIME_UTC_STR', 'AIR_TEMP', 'TRACK_TEMP', 'HUMIDITY', 'PRESSURE', 'WIND_SPEED', 'WIND_DIRECTION', 'RAIN']
 
-    # ---------------------------
-    # TRAINING ENTRY POINT
-    # ---------------------------
-    def train(self, lap_data: pd.DataFrame, telemetry_data: pd.DataFrame, weather_data: pd.DataFrame) -> dict:
-        if lap_data.empty or telemetry_data.empty or weather_data.empty:
-            lap_data, telemetry_data, weather_data = self._fabricate_minimal_data()
-
-        features_df, targets_df = self._extract_tire_features(lap_data, telemetry_data, weather_data)
-
-        if features_df.empty or targets_df.empty:
-            return {'error': 'No valid tire features extracted'}
-
-        X = features_df
-        y = targets_df[self.target_columns]
-
-        valid_mask = ~X.isna().any(axis=1) & ~y.isna().any(axis=1)
-        X = X[valid_mask]
-        y = y[valid_mask]
-
-        if len(X) < 20:
-            return {'error': f'Insufficient training samples: {len(X)}'}
-
-        X_scaled = self.scaler.fit_transform(X)
-        self.feature_columns = X.columns.tolist()
-
+    def train(self, track_data: Dict[str, Dict[str, pd.DataFrame]]) -> dict:
+        """
+        Train tire degradation model using structured data from Firebase loader across all tracks
+        """
         try:
+            # Validate input data structure
+            if not isinstance(track_data, dict) or len(track_data) < 2:
+                return {'error': 'Insufficient tracks for tire model', 'status': 'error'}
+
+            features_list = []
+            targets_list = []
+
+            # Process each track's data
+            for track_name, data_dict in track_data.items():
+                if not self._validate_track_data(data_dict):
+                    continue
+                    
+                track_features, track_targets = self._extract_track_tire_features(data_dict, track_name)
+                if not track_features.empty and not track_targets.empty:
+                    features_list.append(track_features)
+                    targets_list.append(track_targets)
+
+            if not features_list:
+                return {'error': 'No valid tire training data extracted', 'status': 'error'}
+
+            # Combine all track data
+            X = pd.concat(features_list, ignore_index=True)
+            y = pd.concat(targets_list, ignore_index=True)[self.target_columns]
+
+            if X.empty or y.empty:
+                return {'error': 'Empty feature or target matrices', 'status': 'error'}
+
+            # Clean data (should be minimal due to schema enforcement)
+            valid_mask = ~X.isna().any(axis=1) & ~y.isna().any(axis=1)
+            X = X[valid_mask]
+            y = y[valid_mask]
+
+            if len(X) < 20:
+                return {'error': f'Insufficient training samples: {len(X)}', 'status': 'error'}
+
+            # Scale features and train
+            X_scaled = self.scaler.fit_transform(X)
+            self.feature_columns = X.columns.tolist()
+
             X_train, X_test, y_train, y_test = train_test_split(
                 X_scaled, y, test_size=0.2, random_state=42
             )
+            
             self.model.fit(X_train, y_train)
             train_score = self.model.score(X_train, y_train)
             test_score = self.model.score(X_test, y_test)
+            
+            # Calculate average feature importance across all outputs
             avg_feature_importance = np.mean([est.feature_importances_ for est in self.model.estimators_], axis=0)
             feature_importance = dict(zip(self.feature_columns, avg_feature_importance))
+
+            return {
+                'model': self,
+                'features': self.feature_columns,
+                'targets': self.target_columns,
+                'train_score': train_score,
+                'test_score': test_score,
+                'feature_importance': feature_importance,
+                'training_samples': len(X),
+                'tracks_used': len(track_data),
+                'status': 'success'
+            }
+            
         except Exception as e:
-            return {'error': f'Model training failed: {e}'}
+            return {'error': f'Training failed: {str(e)}', 'status': 'error'}
 
-        return {
-            'model': self,
-            'features': self.feature_columns,
-            'targets': self.target_columns,
-            'train_score': train_score,
-            'test_score': test_score,
-            'feature_importance': feature_importance,
-            'training_samples': len(X)
-        }
+    def _validate_track_data(self, data_dict: Dict[str, pd.DataFrame]) -> bool:
+        """Validate that track data has required components for tire analysis using EXACT column names"""
+        pit_data = data_dict.get('pit_data', pd.DataFrame())
+        
+        if pit_data.empty:
+            return False
+            
+        # Check for required columns using EXACT names
+        missing_pit = [col for col in ['NUMBER', 'LAP_NUMBER', 'LAP_TIME', 'S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'] if col not in pit_data.columns]
+        
+        return len(missing_pit) == 0
 
-    # ---------------------------
-    # FEATURE EXTRACTION
-    # ---------------------------
-    def _extract_tire_features(self, lap_data, telemetry_data, weather_data):
+    def _extract_track_tire_features(self, data_dict: Dict[str, pd.DataFrame], track_name: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Extract tire degradation features for all cars in a track using EXACT column names
+        """
+        pit_data = data_dict['pit_data']
+        telemetry_data = data_dict.get('telemetry_data', pd.DataFrame())
+        weather_data = data_dict.get('weather_data', pd.DataFrame())
+
         features_list = []
         targets_list = []
 
-        for (car_number, session), car_laps in lap_data.groupby(['NUMBER', 'meta_session']):
-            car_laps = car_laps.sort_values('LAP_NUMBER')
-            if len(car_laps) < 8:
-                car_laps = self._fabricate_car_laps(car_number, session, 8)
+        # Process each car's stint patterns using EXACT column names
+        for car_number in pit_data['NUMBER'].unique():
+            car_laps = pit_data[pit_data['NUMBER'] == car_number].sort_values('LAP_NUMBER')
+            if len(car_laps) < 5:  # Need sufficient laps for degradation analysis
+                continue
 
-            car_telemetry = telemetry_data[
-                (telemetry_data['vehicle_number'] == car_number) &
-                (telemetry_data['meta_session'] == session)
-            ] if not telemetry_data.empty else pd.DataFrame()
-
-            session_weather = weather_data[
-                weather_data['meta_session'] == session
-            ] if not weather_data.empty else pd.DataFrame()
-
-            stint_features, stint_targets = self._analyze_stint_performance(car_laps, car_telemetry, session_weather)
-            if stint_features is not None and stint_targets is not None:
+            # Analyze stint patterns (groups of consecutive laps)
+            stint_features, stint_targets = self._analyze_car_stints(car_laps, telemetry_data, weather_data, track_name)
+            
+            if not stint_features.empty and not stint_targets.empty:
                 features_list.append(stint_features)
                 targets_list.append(stint_targets)
 
-        features_df = pd.concat(features_list, ignore_index=True) if features_list else pd.DataFrame()
-        targets_df = pd.concat(targets_list, ignore_index=True) if targets_list else pd.DataFrame()
-        return features_df, targets_df
+        if features_list and targets_list:
+            return pd.concat(features_list, ignore_index=True), pd.concat(targets_list, ignore_index=True)
+        return pd.DataFrame(), pd.DataFrame()
 
-    def _analyze_stint_performance(self, car_laps, telemetry_data, weather_data):
-        features, targets = [], []
-        window_size = 5
-
-        for start in range(0, len(car_laps) - window_size):
-            end = start + window_size
-            stint_laps = car_laps.iloc[start:end]
-            if len(stint_laps) < window_size:
+    def _analyze_car_stints(self, car_laps: pd.DataFrame, telemetry_data: pd.DataFrame, 
+                           weather_data: pd.DataFrame, track_name: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Analyze tire degradation across different stints for a single car using EXACT column names
+        """
+        features = []
+        targets = []
+        
+        # Convert lap times to seconds for analysis using EXACT column names
+        car_laps = car_laps.copy()
+        car_laps['LAP_TIME_SECONDS'] = car_laps['LAP_TIME'].apply(self._lap_time_to_seconds)
+        
+        # Use a sliding window to analyze degradation patterns
+        window_size = min(5, len(car_laps) - 1)
+        
+        for i in range(len(car_laps) - window_size):
+            current_stint = car_laps.iloc[i:i + window_size]
+            next_stint = car_laps.iloc[i + window_size:min(i + window_size * 2, len(car_laps))]
+            
+            if len(next_stint) < 2:  # Need at least 2 laps for target calculation
                 continue
+                
+            # Extract features from current stint using EXACT column names
+            stint_features = self._calculate_stint_features(current_stint, telemetry_data, weather_data, track_name)
+            
+            # Calculate degradation targets from next stint using EXACT column names
+            degradation_targets = self._calculate_degradation_targets(current_stint, next_stint)
+            
+            features.append(pd.DataFrame([stint_features]))
+            targets.append(pd.DataFrame([degradation_targets]))
+        
+        if features and targets:
+            return pd.concat(features, ignore_index=True), pd.concat(targets, ignore_index=True)
+        return pd.DataFrame(), pd.DataFrame()
 
-            deg_metrics = self._calculate_degradation_metrics(stint_laps)
-            cond_factors = self._calculate_condition_factors(stint_laps, weather_data)
-            driving_factors = self._calculate_driving_factors(stint_laps, telemetry_data)
-            stint_features = {**deg_metrics, **cond_factors, **driving_factors}
-
-            if end + window_size <= len(car_laps):
-                next_stint = car_laps.iloc[end:end + window_size]
-                deg_targets = self._calculate_degradation_targets(stint_laps, next_stint)
-                features.append(pd.DataFrame([stint_features]))
-                targets.append(pd.DataFrame([deg_targets]))
-
-        features_df = pd.concat(features, ignore_index=True) if features else pd.DataFrame()
-        targets_df = pd.concat(targets, ignore_index=True) if targets else pd.DataFrame()
-        return features_df, targets_df
-
-    # ---------------------------
-    # METRIC CALCULATIONS
-    # ---------------------------
-    def _calculate_degradation_metrics(self, stint_laps):
-        metrics = {}
-        lap_times = stint_laps.get('LAP_TIME_SECONDS', pd.Series([60]*len(stint_laps))).values
-        lap_numbers = stint_laps.get('LAP_NUMBER', pd.Series(range(len(stint_laps)))).values
-
-        slope, r2 = self._linear_trend_analysis(lap_numbers, lap_times)
-        metrics['lap_time_slope'] = slope
-        metrics['lap_time_consistency'] = r2
-
+    def _calculate_stint_features(self, stint_laps: pd.DataFrame, telemetry_data: pd.DataFrame,
+                                weather_data: pd.DataFrame, track_name: str) -> Dict[str, float]:
+        """Calculate tire degradation features from a stint using EXACT column names"""
+        features = {}
+        
+        # Lap time degradation analysis using EXACT column names
+        lap_times = stint_laps['LAP_TIME_SECONDS'].values
+        lap_numbers = stint_laps['LAP_NUMBER'].values
+        
+        # Linear degradation trend
+        if len(lap_times) > 1:
+            time_slope, time_r2 = self._linear_trend_analysis(lap_numbers, lap_times)
+            features['lap_time_degradation_slope'] = max(0.0, time_slope)
+            features['lap_time_consistency'] = time_r2
+        else:
+            features['lap_time_degradation_slope'] = 0.1
+            features['lap_time_consistency'] = 0.0
+            
+        # Sector-specific degradation using EXACT column names
         for i, sector in enumerate(['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'], 1):
-            sector_vals = stint_laps.get(sector, pd.Series([60]*len(stint_laps))).values
-            sector_slope, _ = self._linear_trend_analysis(lap_numbers, sector_vals)
-            metrics[f'sector_{i}_slope'] = sector_slope
+            if sector in stint_laps.columns:
+                sector_times = pd.to_numeric(stint_laps[sector], errors='coerce').fillna(0).values
+                if len(sector_times) > 1:
+                    sector_slope, _ = self._linear_trend_analysis(lap_numbers, sector_times)
+                    features[f'sector_{i}_degradation_slope'] = max(0.0, sector_slope)
+                else:
+                    features[f'sector_{i}_degradation_slope'] = 0.05
+            else:
+                features[f'sector_{i}_degradation_slope'] = 0.05
+        
+        # Additional performance metrics using EXACT column names
+        if 'TOP_SPEED' in stint_laps.columns:
+            features['avg_top_speed'] = stint_laps['TOP_SPEED'].mean()
+        else:
+            features['avg_top_speed'] = 150.0
+            
+        if 'KPH' in stint_laps.columns:
+            features['avg_kph'] = stint_laps['KPH'].mean()
+        else:
+            features['avg_kph'] = 120.0
+            
+        if 'LAP_IMPROVEMENT' in stint_laps.columns:
+            features['lap_improvement_ratio'] = (stint_laps['LAP_IMPROVEMENT'] > 0).mean()
+        else:
+            features['lap_improvement_ratio'] = 0.5
+            
+        if 'FLAG_AT_FL' in stint_laps.columns:
+            caution_flags = stint_laps[stint_laps['FLAG_AT_FL'].str.contains('FCY|SC', na=False)]
+            features['caution_flag_ratio'] = len(caution_flags) / len(stint_laps)
+        else:
+            features['caution_flag_ratio'] = 0.1
+        
+        # Performance metrics
+        features['lap_time_variance'] = np.var(lap_times) if len(lap_times) > 1 else 1.0
+        features['performance_consistency'] = 1.0 / (1.0 + features['lap_time_variance'])
+        
+        # Track and condition factors using EXACT column names
+        features.update(self._calculate_track_conditions(stint_laps, weather_data, track_name))
+        
+        # Driving style factors (from telemetry if available) using EXACT column names
+        features.update(self._calculate_driving_factors(stint_laps, telemetry_data))
+        
+        # Stint characteristics
+        features['stint_length'] = len(stint_laps)
+        features['cumulative_laps'] = stint_laps['LAP_NUMBER'].max()
+        
+        return features
 
-        metrics['lap_time_variance'] = np.var(lap_times)
-        metrics['best_to_worst_ratio'] = np.min(lap_times) / np.max(lap_times)
-        return metrics
-
-    def _calculate_condition_factors(self, stint_laps, weather_data):
-        factors = {}
+    def _calculate_track_conditions(self, stint_laps: pd.DataFrame, weather_data: pd.DataFrame, 
+                                  track_name: str) -> Dict[str, float]:
+        """Calculate track and weather conditions affecting tire wear using EXACT column names"""
+        conditions = {}
+        
+        # Track characteristics
+        conditions['track_abrasiveness'] = self._get_track_abrasiveness(track_name)
+        conditions['track_length_factor'] = self._get_track_length_factor(track_name)
+        
+        # Weather conditions using EXACT column names
         if not weather_data.empty:
-            stint_start, stint_end = stint_laps['timestamp'].min(), stint_laps['timestamp'].max()
-            stint_weather = weather_data[
-                (weather_data['timestamp'] >= stint_start) & (weather_data['timestamp'] <= stint_end)
-            ]
-            factors['avg_track_temp'] = stint_weather['TRACK_TEMP'].mean() if not stint_weather.empty else 35.0
-            factors['track_temp_range'] = (stint_weather['TRACK_TEMP'].max() - stint_weather['TRACK_TEMP'].min()) if not stint_weather.empty else 5.0
-            factors['avg_air_temp'] = stint_weather['AIR_TEMP'].mean() if not stint_weather.empty else 25.0
+            conditions['avg_track_temp'] = weather_data['TRACK_TEMP'].mean() if 'TRACK_TEMP' in weather_data.columns else 35.0
+            conditions['track_temp_variance'] = weather_data['TRACK_TEMP'].var() if 'TRACK_TEMP' in weather_data.columns else 5.0
+            conditions['avg_air_temp'] = weather_data['AIR_TEMP'].mean() if 'AIR_TEMP' in weather_data.columns else 25.0
+            conditions['humidity_level'] = weather_data['HUMIDITY'].mean() if 'HUMIDITY' in weather_data.columns else 50.0
+            conditions['pressure_level'] = weather_data['PRESSURE'].mean() if 'PRESSURE' in weather_data.columns else 1013.0
         else:
-            factors['avg_track_temp'] = 35.0
-            factors['track_temp_range'] = 5.0
-            factors['avg_air_temp'] = 25.0
+            conditions['avg_track_temp'] = 35.0
+            conditions['track_temp_variance'] = 5.0
+            conditions['avg_air_temp'] = 25.0
+            conditions['humidity_level'] = 50.0
+            conditions['pressure_level'] = 1013.0
+            
+        return conditions
 
-        track_name = stint_laps.get('meta_event', pd.Series(['unknown'])).iloc[0]
-        factors['track_abrasiveness'] = self._get_track_abrasiveness(track_name)
-        return factors
-
-    def _calculate_driving_factors(self, stint_laps, telemetry_data):
-        factors = {}
+    def _calculate_driving_factors(self, stint_laps: pd.DataFrame, telemetry_data: pd.DataFrame) -> Dict[str, float]:
+        """Calculate driving style factors from telemetry data using EXACT column names"""
+        factors = {
+            'estimated_lateral_force': 0.5,
+            'estimated_braking_force': 0.3,
+            'driving_aggressiveness': 0.6,
+            'gear_usage_efficiency': 0.7
+        }
+        
         if not telemetry_data.empty:
-            stint_telemetry = telemetry_data[
-                telemetry_data['lap'].between(stint_laps['LAP_NUMBER'].min(), stint_laps['LAP_NUMBER'].max())
+            car_number = stint_laps['NUMBER'].iloc[0]
+            stint_lap_numbers = stint_laps['LAP_NUMBER'].values
+            
+            # Filter telemetry for this car and stint laps using EXACT column names
+            car_telemetry = telemetry_data[
+                (telemetry_data['vehicle_id'].str.contains(str(car_number))) &
+                (telemetry_data['lap'].isin(stint_lap_numbers))
             ]
-            factors['avg_lateral_g'] = stint_telemetry.get('accy_can', pd.Series([0.5])).abs().mean()
-            factors['avg_brake_pressure'] = ((stint_telemetry.get('pbrake_f', 0) + stint_telemetry.get('pbrake_r', 0))/2).mean() if not stint_telemetry.empty else 50.0
-            factors['avg_throttle_usage'] = stint_telemetry.get('aps', pd.Series([60])).mean()
-            factors['steering_variance'] = stint_telemetry.get('Steering_Angle', pd.Series([10])).var()
-        else:
-            factors['avg_lateral_g'] = 0.5
-            factors['avg_brake_pressure'] = 50.0
-            factors['avg_throttle_usage'] = 60.0
-            factors['steering_variance'] = 10.0
-
-        factors['stint_length'] = len(stint_laps)
-        factors['cumulative_laps'] = stint_laps.get('LAP_NUMBER', pd.Series([0])).max()
+            
+            if not car_telemetry.empty:
+                # Estimate lateral forces from lateral acceleration using EXACT column names
+                if 'accy_can' in car_telemetry.columns:
+                    factors['estimated_lateral_force'] = car_telemetry['accy_can'].abs().mean()
+                
+                # Estimate braking from longitudinal acceleration using EXACT column names
+                if 'accx_can' in car_telemetry.columns:
+                    braking_events = car_telemetry[car_telemetry['accx_can'] < -0.5]
+                    factors['estimated_braking_force'] = len(braking_events) / len(car_telemetry) if len(car_telemetry) > 0 else 0.3
+                
+                # Gear usage efficiency using EXACT column names
+                if 'gear' in car_telemetry.columns:
+                    optimal_gear_ratio = (car_telemetry['gear'].between(3, 5)).mean()
+                    factors['gear_usage_efficiency'] = optimal_gear_ratio
+                
+                # Driving aggressiveness (speed variance + acceleration patterns)
+                if 'speed' in car_telemetry.columns:
+                    speed_variance = car_telemetry['speed'].var()
+                    factors['driving_aggressiveness'] = min(1.0, speed_variance / 1000.0)
+                    
         return factors
 
-    def _calculate_degradation_targets(self, current_stint, next_stint):
+    def _calculate_degradation_targets(self, current_stint: pd.DataFrame, next_stint: pd.DataFrame) -> Dict[str, float]:
+        """Calculate actual degradation observed between stints using EXACT column names"""
         targets = {}
+        
+        # Sector degradation (time increase per lap) using EXACT column names
         for i, sector in enumerate(['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'], 1):
-            current_avg = current_stint.get(sector, pd.Series([60])).mean()
-            next_avg = next_stint.get(sector, pd.Series([60])).mean()
-            targets[f'degradation_s{i}'] = max(0.001, min(0.5, (next_avg - current_avg) / len(next_stint)))
-        curr_avg_time = current_stint.get('LAP_TIME_SECONDS', pd.Series([60])).mean()
-        next_avg_time = next_stint.get('LAP_TIME_SECONDS', pd.Series([60])).mean()
-        targets['grip_loss_rate'] = max(0.001, min(1.0, (next_avg_time - curr_avg_time) / len(next_stint)))
+            if sector in current_stint.columns and sector in next_stint.columns:
+                current_avg = pd.to_numeric(current_stint[sector], errors='coerce').mean()
+                next_avg = pd.to_numeric(next_stint[sector], errors='coerce').mean()
+                degradation_per_lap = (next_avg - current_avg) / len(next_stint)
+                targets[f'degradation_s{i}'] = max(0.001, min(0.5, degradation_per_lap))
+            else:
+                targets[f'degradation_s{i}'] = 0.05
+        
+        # Overall grip loss rate using EXACT column names
+        current_avg_time = current_stint['LAP_TIME_SECONDS'].mean()
+        next_avg_time = next_stint['LAP_TIME_SECONDS'].mean()
+        grip_loss = (next_avg_time - current_avg_time) / len(next_stint)
+        targets['grip_loss_rate'] = max(0.001, min(1.0, grip_loss))
+        
         return targets
 
-    def _linear_trend_analysis(self, x, y):
+    def _linear_trend_analysis(self, x: np.ndarray, y: np.ndarray) -> Tuple[float, float]:
+        """Calculate linear trend slope and R² value"""
         if len(x) < 2:
             return 0.0, 0.0
         try:
             slope = np.polyfit(x, y, 1)[0]
-            r2 = np.corrcoef(x, y)[0, 1] ** 2
-            return slope, r2
+            correlation = np.corrcoef(x, y)[0, 1]
+            r_squared = correlation ** 2 if not np.isnan(correlation) else 0.0
+            return slope, r_squared
         except:
             return 0.0, 0.0
 
-    def _get_track_abrasiveness(self, track_name):
-        abrasiveness_map = {'sebring': 0.9, 'barber': 0.8, 'sonoma': 0.7, 'cota': 0.6, 'road-america': 0.5, 'vir': 0.6}
-        return abrasiveness_map.get(track_name.lower(), 0.7)
+    def _get_track_abrasiveness(self, track_name: str) -> float:
+        """Estimate track abrasiveness based on actual track names"""
+        high_abrasion = ['barber', 'sonoma', 'sebring']
+        medium_abrasion = ['cota', 'road_america', 'virginia']
+        
+        track_lower = track_name.lower()
+        if any(track in track_lower for track in high_abrasion):
+            return 0.8
+        elif any(track in track_lower for track in medium_abrasion):
+            return 0.5
+        else:
+            return 0.6
 
-    # ---------------------------
-    # PREDICTION
-    # ---------------------------
-    def predict_degradation(self, features):
+    def _get_track_length_factor(self, track_name: str) -> float:
+        """Normalize by track length (simplified)"""
+        long_tracks = ['road_america', 'cota']
+        short_tracks = ['barber', 'sonoma']
+        
+        track_lower = track_name.lower()
+        if any(track in track_lower for track in long_tracks):
+            return 1.2
+        elif any(track in track_lower for track in short_tracks):
+            return 0.8
+        else:
+            return 1.0
+
+    def _lap_time_to_seconds(self, lap_time: str) -> float:
+        """Convert lap time string to seconds (consistent with FirebaseDataLoader)"""
         try:
-            vec = np.array([features.get(col, 0) for col in self.feature_columns]).reshape(1, -1)
-            scaled = self.scaler.transform(vec)
-            preds = self.model.predict(scaled)[0]
-            return dict(zip(self.target_columns, preds))
+            if pd.isna(lap_time) or lap_time == 0:
+                return 60.0
+                
+            time_str = str(lap_time).strip()
+            parts = time_str.split(':')
+            
+            if len(parts) == 3:  # HH:MM:SS.ms
+                hours, minutes, seconds = parts
+                return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
+            elif len(parts) == 2:  # MM:SS.ms
+                minutes, seconds = parts
+                return float(minutes) * 60 + float(seconds)
+            else:
+                return float(time_str)
         except:
-            return self._fallback_degradation(features)
+            return 60.0
 
-    def _fallback_degradation(self, features):
-        return {'degradation_s1': 0.05, 'degradation_s2': 0.05, 'degradation_s3': 0.05, 'grip_loss_rate': 0.1}
+    def predict_tire_degradation(self, features: Dict[str, float]) -> Dict[str, float]:
+        """Predict tire degradation rates for given features"""
+        try:
+            if not self.feature_columns:
+                return self._get_fallback_degradation()
+                
+            # Ensure all features are present
+            feature_vector = [features.get(col, 0.0) for col in self.feature_columns]
+            X = np.array(feature_vector).reshape(1, -1)
+            X_scaled = self.scaler.transform(X)
+            
+            predictions = self.model.predict(X_scaled)[0]
+            return dict(zip(self.target_columns, predictions))
+            
+        except Exception:
+            return self._get_fallback_degradation()
 
-    def estimate_optimal_stint_length(self, features, threshold=0.2):
-        rates = self.predict_degradation(features)
-        avg_deg = np.mean([rates['degradation_s1'], rates['degradation_s2'], rates['degradation_s3']])
-        return max(5, min(30, int(threshold / avg_deg))) if avg_deg > 0 else 15
+    def _get_fallback_degradation(self) -> Dict[str, float]:
+        """Fallback degradation rates when model is unavailable"""
+        return {
+            'degradation_s1': 0.05,
+            'degradation_s2': 0.05, 
+            'degradation_s3': 0.05,
+            'grip_loss_rate': 0.1
+        }
 
-    # ---------------------------
-    # SYNTHETIC DATA HELPERS
-    # ---------------------------
-    def _fabricate_minimal_data(self):
-        lap_data = pd.concat([self._fabricate_car_laps(v, 'session1', 10) for v in range(1, 3)], ignore_index=True)
-        telemetry_data = pd.concat([self._fabricate_car_telemetry(v, 'session1', 10) for v in range(1, 3)], ignore_index=True)
-        weather_data = pd.DataFrame([{'meta_session': 'session1', 'timestamp': pd.Timestamp.now(),
-                                      'TRACK_TEMP': 35.0, 'AIR_TEMP': 25.0}])
-        return lap_data, telemetry_data, weather_data
+    def estimate_optimal_stint_length(self, features: Dict[str, float], performance_threshold: float = 0.2) -> int:
+        """Estimate optimal stint length before tire performance drops below threshold"""
+        try:
+            degradation_rates = self.predict_tire_degradation(features)
+            avg_degradation = np.mean([
+                degradation_rates['degradation_s1'],
+                degradation_rates['degradation_s2'], 
+                degradation_rates['degradation_s3']
+            ])
+            
+            if avg_degradation <= 0:
+                return 20
+                
+            optimal_laps = int(performance_threshold / avg_degradation)
+            return max(5, min(30, optimal_laps))
+            
+        except Exception:
+            return 15
 
-    def _fabricate_car_laps(self, vehicle_num, session, n_laps):
-        return pd.DataFrame({
-            'NUMBER': vehicle_num,
-            'meta_session': session,
-            'LAP_NUMBER': np.arange(1, n_laps+1),
-            'LAP_TIME_SECONDS': np.random.uniform(55, 65, n_laps),
-            'S1_SECONDS': np.random.uniform(18, 22, n_laps),
-            'S2_SECONDS': np.random.uniform(18, 22, n_laps),
-            'S3_SECONDS': np.random.uniform(18, 22, n_laps),
-            'timestamp': pd.date_range('2025-01-01', periods=n_laps)
-        })
-
-    def _fabricate_car_telemetry(self, vehicle_num, session, n_laps):
-        return pd.DataFrame({
-            'vehicle_number': vehicle_num,
-            'meta_session': session,
-            'lap': np.repeat(np.arange(1, n_laps+1), 10),
-            'aps': np.random.uniform(30, 80, n_laps*10),
-            'pbrake_f': np.random.uniform(0, 50, n_laps*10),
-            'pbrake_r': np.random.uniform(0, 50, n_laps*10),
-            'accy_can': np.random.uniform(-1, 1, n_laps*10),
-            'Steering_Angle': np.random.uniform(-15, 15, n_laps*10)
-        })
-
-    # ---------------------------
-    # MODEL SERIALIZATION
-    # ---------------------------
-    def save_model(self, filepath):
+    def save_model(self, filepath: str):
+        """Save trained model to file"""
         joblib.dump({
             'model': self.model,
             'scaler': self.scaler,
@@ -572,7 +435,8 @@ class TireModelTrainer:
             'target_columns': self.target_columns
         }, filepath)
 
-    def load_model(self, filepath):
+    def load_model(self, filepath: str):
+        """Load trained model from file"""
         data = joblib.load(filepath)
         self.model = data['model']
         self.scaler = data['scaler']
@@ -603,8 +467,6 @@ class TireModelTrainer:
 
 
 
-
-
 # import pandas as pd
 # import numpy as np
 # from sklearn.ensemble import RandomForestRegressor
@@ -612,6 +474,7 @@ class TireModelTrainer:
 # from sklearn.preprocessing import StandardScaler
 # from sklearn.multioutput import MultiOutputRegressor
 # import joblib
+# from typing import Dict, List, Tuple
 
 # class TireModelTrainer:
 #     def __init__(self):
@@ -621,856 +484,274 @@ class TireModelTrainer:
 #         self.scaler = StandardScaler()
 #         self.feature_columns = []
 #         self.target_columns = ['degradation_s1', 'degradation_s2', 'degradation_s3', 'grip_loss_rate']
+        
+#         # Define expected data structures based on your schema
+#         self.required_pit_cols = ['NUMBER', 'LAP_NUMBER', 'LAP_TIME', 'S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS']
+#         self.required_telemetry_cols = ['vehicle_id', 'lap', 'accx_can', 'accy_can', 'speed']
+#         self.required_weather_cols = ['TIME_UTC_SECONDS', 'TRACK_TEMP', 'AIR_TEMP']
 
-#     # ------------------------------------------------------------
-#     # TRAINING ENTRY POINT
-#     # ------------------------------------------------------------
-#     def train(self, lap_data: pd.DataFrame, telemetry_data: pd.DataFrame, weather_data: pd.DataFrame) -> dict:
-#         if lap_data.empty:
-#             lap_data, telemetry_data, weather_data = self._fabricate_minimal_data()
-
-#         features_df, targets_df = self._extract_tire_features(lap_data, telemetry_data, weather_data)
-
-#         if features_df.empty or targets_df.empty:
-#             return {'error': 'No valid tire features extracted'}
-
-#         X = features_df
-#         y = targets_df[self.target_columns]
-
-#         valid_mask = ~X.isna().any(axis=1) & ~y.isna().any(axis=1)
-#         X = X[valid_mask]
-#         y = y[valid_mask]
-
-#         if len(X) < 20:
-#             return {'error': f'Insufficient training samples: {len(X)}'}
-
-#         X_scaled = self.scaler.fit_transform(X)
-#         self.feature_columns = X.columns.tolist()
-
-#         X_train, X_test, y_train, y_test = train_test_split(
-#             X_scaled, y, test_size=0.2, random_state=42
-#         )
-#         self.model.fit(X_train, y_train)
-
-#         train_score = self.model.score(X_train, y_train)
-#         test_score = self.model.score(X_test, y_test)
-#         avg_feature_importance = np.mean([est.feature_importances_ for est in self.model.estimators_], axis=0)
-#         feature_importance = dict(zip(self.feature_columns, avg_feature_importance))
-
-#         return {
-#             'model': self,
-#             'features': self.feature_columns,
-#             'targets': self.target_columns,
-#             'train_score': train_score,
-#             'test_score': test_score,
-#             'feature_importance': feature_importance,
-#             'training_samples': len(X)
-#         }
-
-#     # ------------------------------------------------------------
-#     # FEATURE EXTRACTION
-#     # ------------------------------------------------------------
-#     def _extract_tire_features(self, lap_data: pd.DataFrame, telemetry_data: pd.DataFrame, weather_data: pd.DataFrame) -> tuple:
-#         features_list = []
-#         targets_list = []
-
-#         for (car_number, session), car_laps in lap_data.groupby(['NUMBER', 'meta_session']):
-#             car_laps = car_laps.sort_values('LAP_NUMBER')
-#             if len(car_laps) < 8:
-#                 # fabricate missing laps
-#                 car_laps = self._fabricate_car_laps(car_number, session, 8)
-
-#             car_telemetry = telemetry_data[
-#                 (telemetry_data['vehicle_number'] == car_number) &
-#                 (telemetry_data['meta_session'] == session)
-#             ] if not telemetry_data.empty else pd.DataFrame()
-
-#             session_weather = weather_data[
-#                 weather_data['meta_session'] == session
-#             ] if not weather_data.empty else pd.DataFrame()
-
-#             stint_features, stint_targets = self._analyze_stint_performance(car_laps, car_telemetry, session_weather)
-
-#             if stint_features is not None and stint_targets is not None:
-#                 features_list.append(stint_features)
-#                 targets_list.append(stint_targets)
-
-#         features_df = pd.concat(features_list, ignore_index=True) if features_list else pd.DataFrame()
-#         targets_df = pd.concat(targets_list, ignore_index=True) if targets_list else pd.DataFrame()
-#         return features_df, targets_df
-
-#     def _analyze_stint_performance(self, car_laps: pd.DataFrame, telemetry_data: pd.DataFrame, weather_data: pd.DataFrame) -> tuple:
-#         features = []
-#         targets = []
-#         window_size = 5
-
-#         for start_lap in range(0, len(car_laps) - window_size):
-#             end_lap = start_lap + window_size
-#             stint_laps = car_laps.iloc[start_lap:end_lap]
-#             if len(stint_laps) < window_size:
-#                 continue
-
-#             degradation_metrics = self._calculate_degradation_metrics(stint_laps, telemetry_data)
-#             condition_factors = self._calculate_condition_factors(stint_laps, weather_data)
-#             driving_factors = self._calculate_driving_factors(stint_laps, telemetry_data)
-#             stint_features = {**degradation_metrics, **condition_factors, **driving_factors}
-
-#             if end_lap + window_size <= len(car_laps):
-#                 next_stint = car_laps.iloc[end_lap:end_lap + window_size]
-#                 degradation_targets = self._calculate_degradation_targets(stint_laps, next_stint)
-#                 features.append(pd.DataFrame([stint_features]))
-#                 targets.append(pd.DataFrame([degradation_targets]))
-
-#         features_df = pd.concat(features, ignore_index=True) if features else pd.DataFrame()
-#         targets_df = pd.concat(targets, ignore_index=True) if targets else pd.DataFrame()
-#         return features_df, targets_df
-
-#     # ------------------------------------------------------------
-#     # METRIC CALCULATIONS
-#     # ------------------------------------------------------------
-#     def _calculate_degradation_metrics(self, stint_laps: pd.DataFrame, telemetry_data: pd.DataFrame) -> dict:
-#         metrics = {}
-#         lap_times = stint_laps.get('LAP_TIME_SECONDS', pd.Series([60]*len(stint_laps))).values
-#         lap_numbers = stint_laps.get('LAP_NUMBER', pd.Series(range(len(stint_laps)))).values
-
+#     def train(self, processed_data: Dict[str, Dict[str, pd.DataFrame]]) -> dict:
+#         """
+#         Train tire degradation model using structured data from Firebase loader
+#         """
 #         try:
-#             slope, r2 = self._linear_trend_analysis(lap_numbers, lap_times)
-#             metrics['lap_time_slope'] = slope
-#             metrics['lap_time_consistency'] = r2
-#         except:
-#             metrics['lap_time_slope'] = 0.0
-#             metrics['lap_time_consistency'] = 0.0
-
-#         for i, sector in enumerate(['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'], 1):
-#             try:
-#                 sector_vals = stint_laps.get(sector, pd.Series([60]*len(stint_laps))).values
-#                 sector_slope, _ = self._linear_trend_analysis(lap_numbers, sector_vals)
-#                 metrics[f'sector_{i}_slope'] = sector_slope
-#             except:
-#                 metrics[f'sector_{i}_slope'] = 0.0
-
-#         metrics['lap_time_variance'] = np.var(lap_times)
-#         metrics['best_to_worst_ratio'] = np.min(lap_times) / np.max(lap_times)
-#         return metrics
-
-#     def _calculate_condition_factors(self, stint_laps: pd.DataFrame, weather_data: pd.DataFrame) -> dict:
-#         factors = {}
-#         if not weather_data.empty:
-#             stint_start, stint_end = stint_laps['timestamp'].min(), stint_laps['timestamp'].max()
-#             stint_weather = weather_data[
-#                 (weather_data['timestamp'] >= stint_start) & (weather_data['timestamp'] <= stint_end)
-#             ]
-#             factors['avg_track_temp'] = stint_weather['TRACK_TEMP'].mean() if not stint_weather.empty else 35.0
-#             factors['track_temp_range'] = (stint_weather['TRACK_TEMP'].max() - stint_weather['TRACK_TEMP'].min()) if not stint_weather.empty else 5.0
-#             factors['avg_air_temp'] = stint_weather['AIR_TEMP'].mean() if not stint_weather.empty else 25.0
-#         else:
-#             factors['avg_track_temp'] = 35.0
-#             factors['track_temp_range'] = 5.0
-#             factors['avg_air_temp'] = 25.0
-
-#         track_name = stint_laps.get('meta_event', pd.Series(['unknown'])).iloc[0]
-#         factors['track_abrasiveness'] = self._get_track_abrasiveness(track_name)
-#         return factors
-
-#     def _calculate_driving_factors(self, stint_laps: pd.DataFrame, telemetry_data: pd.DataFrame) -> dict:
-#         factors = {}
-#         if not telemetry_data.empty:
-#             stint_telemetry = telemetry_data[
-#                 telemetry_data['lap'].between(stint_laps['LAP_NUMBER'].min(), stint_laps['LAP_NUMBER'].max())
-#             ]
-#             factors['avg_lateral_g'] = stint_telemetry.get('accy_can', pd.Series([0.5])).abs().mean()
-#             factors['avg_brake_pressure'] = ((stint_telemetry.get('pbrake_f', 0) + stint_telemetry.get('pbrake_r', 0))/2).mean() if not stint_telemetry.empty else 50.0
-#             factors['avg_throttle_usage'] = stint_telemetry.get('aps', pd.Series([60])).mean()
-#             factors['steering_variance'] = stint_telemetry.get('Steering_Angle', pd.Series([10])).var()
-#         else:
-#             factors['avg_lateral_g'] = 0.5
-#             factors['avg_brake_pressure'] = 50.0
-#             factors['avg_throttle_usage'] = 60.0
-#             factors['steering_variance'] = 10.0
-
-#         factors['stint_length'] = len(stint_laps)
-#         factors['cumulative_laps'] = stint_laps.get('LAP_NUMBER', pd.Series([0])).max()
-#         return factors
-
-#     def _calculate_degradation_targets(self, current_stint: pd.DataFrame, next_stint: pd.DataFrame) -> dict:
-#         targets = {}
-#         for i, sector in enumerate(['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'], 1):
-#             current_avg = current_stint.get(sector, pd.Series([60])).mean()
-#             next_avg = next_stint.get(sector, pd.Series([60])).mean()
-#             targets[f'degradation_s{i}'] = max(0.001, min(0.5, (next_avg - current_avg) / len(next_stint)))
-#         current_avg_time = current_stint.get('LAP_TIME_SECONDS', pd.Series([60])).mean()
-#         next_avg_time = next_stint.get('LAP_TIME_SECONDS', pd.Series([60])).mean()
-#         targets['grip_loss_rate'] = max(0.001, min(1.0, (next_avg_time - current_avg_time) / len(next_stint)))
-#         return targets
-
-#     def _linear_trend_analysis(self, x, y):
-#         if len(x) < 2:
-#             return 0.0, 0.0
-#         try:
-#             slope = np.polyfit(x, y, 1)[0]
-#             r_squared = np.corrcoef(x, y)[0, 1] ** 2
-#             return slope, r_squared
-#         except:
-#             return 0.0, 0.0
-
-#     def _get_track_abrasiveness(self, track_name: str) -> float:
-#         abrasiveness_map = {
-#             'sebring': 0.9, 'barber': 0.8, 'sonoma': 0.7,
-#             'cota': 0.6, 'road-america': 0.5, 'vir': 0.6
-#         }
-#         return abrasiveness_map.get(track_name.lower(), 0.7)
-
-#     # ------------------------------------------------------------
-#     # PREDICTION / FALLBACK
-#     # ------------------------------------------------------------
-#     def predict_degradation(self, features: dict) -> dict:
-#         try:
-#             feature_vector = [features.get(col, 0) for col in self.feature_columns]
-#             feature_array = np.array(feature_vector).reshape(1, -1)
-#             scaled_features = self.scaler.transform(feature_array)
-#             predictions = self.model.predict(scaled_features)[0]
-#             return dict(zip(self.target_columns, predictions))
-#         except:
-#             return self._fallback_degradation(features)
-
-#     def _fallback_degradation(self, features: dict) -> dict:
-#         return {'degradation_s1': 0.05, 'degradation_s2': 0.05, 'degradation_s3': 0.05, 'grip_loss_rate': 0.1}
-
-#     def estimate_optimal_stint_length(self, features: dict, threshold: float = 0.2) -> int:
-#         degradation_rates = self.predict_degradation(features)
-#         avg_degradation = np.mean([degradation_rates['degradation_s1'],
-#                                    degradation_rates['degradation_s2'],
-#                                    degradation_rates['degradation_s3']])
-#         return max(5, min(30, int(threshold / avg_degradation))) if avg_degradation > 0 else 15
-
-#     # ------------------------------------------------------------
-#     # SYNTHETIC DATA HELPERS
-#     # ------------------------------------------------------------
-#     def _fabricate_minimal_data(self) -> tuple:
-#         lap_data = pd.concat([self._fabricate_car_laps(vehicle, 'session1', 10) for vehicle in range(1,3)], ignore_index=True)
-#         telemetry_data = pd.concat([self._fabricate_car_telemetry(vehicle, 'session1', 10) for vehicle in range(1,3)], ignore_index=True)
-#         weather_data = pd.DataFrame([{
-#             'meta_session': 'session1',
-#             'timestamp': pd.Timestamp.now(),
-#             'TRACK_TEMP': 35.0,
-#             'AIR_TEMP': 25.0
-#         }])
-#         return lap_data, telemetry_data, weather_data
-
-#     def _fabricate_car_laps(self, vehicle_num: int, session: str, n_laps: int) -> pd.DataFrame:
-#         return pd.DataFrame({
-#             'NUMBER': vehicle_num,
-#             'meta_session': session,
-#             'LAP_NUMBER': np.arange(1, n_laps+1),
-#             'LAP_TIME_SECONDS': np.random.uniform(55, 65, n_laps),
-#             'S1_SECONDS': np.random.uniform(18, 22, n_laps),
-#             'S2_SECONDS': np.random.uniform(18, 22, n_laps),
-#             'S3_SECONDS': np.random.uniform(18, 22, n_laps),
-#             'timestamp': pd.date_range('2025-01-01', periods=n_laps)
-#         })
-
-#     def _fabricate_car_telemetry(self, vehicle_num: int, session: str, n_laps: int) -> pd.DataFrame:
-#         return pd.DataFrame({
-#             'vehicle_number': vehicle_num,
-#             'meta_session': session,
-#             'lap': np.repeat(np.arange(1, n_laps+1), 10),
-#             'aps': np.random.uniform(30, 80, n_laps*10),
-#             'pbrake_f': np.random.uniform(0, 50, n_laps*10),
-#             'pbrake_r': np.random.uniform(0, 50, n_laps*10),
-#             'accy_can': np.random.uniform(-1, 1, n_laps*10),
-#             'Steering_Angle': np.random.uniform(-15, 15, n_laps*10)
-#         })
-
-#     # ------------------------------------------------------------
-#     # MODEL SERIALIZATION
-#     # ------------------------------------------------------------
-#     def save_model(self, filepath: str):
-#         joblib.dump({
-#             'model': self.model,
-#             'scaler': self.scaler,
-#             'feature_columns': self.feature_columns,
-#             'target_columns': self.target_columns
-#         }, filepath)
-
-#     def load_model(self, filepath: str):
-#         data = joblib.load(filepath)
-#         self.model = data['model']
-#         self.scaler = data['scaler']
-#         self.feature_columns = data['feature_columns']
-#         self.target_columns = data['target_columns']
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# import pandas as pd
-# import numpy as np
-# from sklearn.ensemble import RandomForestRegressor
-# from sklearn.model_selection import train_test_split
-# from sklearn.preprocessing import StandardScaler
-# from sklearn.multioutput import MultiOutputRegressor
-# import joblib
-
-# class TireModelTrainer:
-#     def __init__(self):
-#         self.model = MultiOutputRegressor(
-#             RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-#         )
-#         self.scaler = StandardScaler()
-#         self.feature_columns = []
-#         self.target_columns = ['degradation_s1', 'degradation_s2', 'degradation_s3', 'grip_loss_rate']
-
-#     # ------------------------------------------------------------
-#     # TRAINING ENTRY POINT
-#     # ------------------------------------------------------------
-#     def train(self, lap_data: pd.DataFrame, telemetry_data: pd.DataFrame, weather_data: pd.DataFrame) -> dict:
-#         if lap_data.empty:
-#             return {'error': 'No lap data provided'}
-
-#         features_df, targets_df = self._extract_tire_features(lap_data, telemetry_data, weather_data)
-
-#         if features_df.empty or targets_df.empty:
-#             return {'error': 'No valid tire features extracted'}
-
-#         X = features_df
-#         y = targets_df[self.target_columns]
-
-#         # Drop rows with any NaNs
-#         valid_mask = ~X.isna().any(axis=1) & ~y.isna().any(axis=1)
-#         X = X[valid_mask]
-#         y = y[valid_mask]
-
-#         if len(X) < 20:
-#             return {'error': f'Insufficient training samples: {len(X)}'}
-
-#         # Scale features
-#         X_scaled = self.scaler.fit_transform(X)
-#         self.feature_columns = X.columns.tolist()
-
-#         # Train model
-#         X_train, X_test, y_train, y_test = train_test_split(
-#             X_scaled, y, test_size=0.2, random_state=42
-#         )
-#         self.model.fit(X_train, y_train)
-
-#         # Evaluate
-#         train_score = self.model.score(X_train, y_train)
-#         test_score = self.model.score(X_test, y_test)
-#         avg_feature_importance = np.mean([est.feature_importances_ for est in self.model.estimators_], axis=0)
-#         feature_importance = dict(zip(self.feature_columns, avg_feature_importance))
-
-#         return {
-#             'model': self,
-#             'features': self.feature_columns,
-#             'targets': self.target_columns,
-#             'train_score': train_score,
-#             'test_score': test_score,
-#             'feature_importance': feature_importance,
-#             'training_samples': len(X)
-#         }
-
-#     # ------------------------------------------------------------
-#     # FEATURE EXTRACTION
-#     # ------------------------------------------------------------
-#     def _extract_tire_features(self, lap_data: pd.DataFrame, telemetry_data: pd.DataFrame, weather_data: pd.DataFrame) -> tuple:
-#         features_list = []
-#         targets_list = []
-
-#         for (car_number, session), car_laps in lap_data.groupby(['NUMBER', 'meta_session']):
-#             car_laps = car_laps.sort_values('LAP_NUMBER')
-#             if len(car_laps) < 8:
-#                 continue
-
-#             car_telemetry = telemetry_data[
-#                 (telemetry_data['vehicle_number'] == car_number) &
-#                 (telemetry_data['meta_session'] == session)
-#             ] if not telemetry_data.empty else pd.DataFrame()
-
-#             session_weather = weather_data[
-#                 weather_data['meta_session'] == session
-#             ] if not weather_data.empty else pd.DataFrame()
-
-#             stint_features, stint_targets = self._analyze_stint_performance(car_laps, car_telemetry, session_weather)
-
-#             if stint_features is not None and stint_targets is not None:
-#                 features_list.append(stint_features)
-#                 targets_list.append(stint_targets)
-
-#         features_df = pd.concat(features_list, ignore_index=True) if features_list else pd.DataFrame()
-#         targets_df = pd.concat(targets_list, ignore_index=True) if targets_list else pd.DataFrame()
-#         return features_df, targets_df
-
-#     def _analyze_stint_performance(self, car_laps: pd.DataFrame, telemetry_data: pd.DataFrame, weather_data: pd.DataFrame) -> tuple:
-#         features = []
-#         targets = []
-#         window_size = 5
-
-#         for start_lap in range(0, len(car_laps) - window_size):
-#             end_lap = start_lap + window_size
-#             stint_laps = car_laps.iloc[start_lap:end_lap]
-#             if len(stint_laps) < window_size:
-#                 continue
-
-#             degradation_metrics = self._calculate_degradation_metrics(stint_laps, telemetry_data)
-#             condition_factors = self._calculate_condition_factors(stint_laps, weather_data)
-#             driving_factors = self._calculate_driving_factors(stint_laps, telemetry_data)
-#             stint_features = {**degradation_metrics, **condition_factors, **driving_factors}
-
-#             if end_lap + window_size <= len(car_laps):
-#                 next_stint = car_laps.iloc[end_lap:end_lap + window_size]
-#                 degradation_targets = self._calculate_degradation_targets(stint_laps, next_stint)
-#                 features.append(pd.DataFrame([stint_features]))
-#                 targets.append(pd.DataFrame([degradation_targets]))
-
-#         features_df = pd.concat(features, ignore_index=True) if features else pd.DataFrame()
-#         targets_df = pd.concat(targets, ignore_index=True) if targets else pd.DataFrame()
-#         return features_df, targets_df
-
-#     # ------------------------------------------------------------
-#     # METRIC CALCULATIONS
-#     # ------------------------------------------------------------
-#     def _calculate_degradation_metrics(self, stint_laps: pd.DataFrame, telemetry_data: pd.DataFrame) -> dict:
-#         metrics = {}
-#         lap_times = stint_laps['LAP_TIME_SECONDS'].values
-#         lap_numbers = stint_laps['LAP_NUMBER'].values
-
-#         try:
-#             slope, r2 = self._linear_trend_analysis(lap_numbers, lap_times)
-#             metrics['lap_time_slope'] = slope
-#             metrics['lap_time_consistency'] = r2
-#         except:
-#             metrics['lap_time_slope'] = 0.0
-#             metrics['lap_time_consistency'] = 0.0
-
-#         for i, sector in enumerate(['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'], 1):
-#             if sector in stint_laps.columns:
-#                 try:
-#                     sector_slope, _ = self._linear_trend_analysis(lap_numbers, stint_laps[sector].values)
-#                     metrics[f'sector_{i}_slope'] = sector_slope
-#                 except:
-#                     metrics[f'sector_{i}_slope'] = 0.0
-#             else:
-#                 metrics[f'sector_{i}_slope'] = 0.0
-
-#         metrics['lap_time_variance'] = np.var(lap_times)
-#         metrics['best_to_worst_ratio'] = np.min(lap_times) / np.max(lap_times)
-#         return metrics
-
-#     def _calculate_condition_factors(self, stint_laps: pd.DataFrame, weather_data: pd.DataFrame) -> dict:
-#         factors = {}
-#         if not weather_data.empty:
-#             stint_start, stint_end = stint_laps['timestamp'].min(), stint_laps['timestamp'].max()
-#             stint_weather = weather_data[
-#                 (weather_data['timestamp'] >= stint_start) & (weather_data['timestamp'] <= stint_end)
-#             ]
-#             factors['avg_track_temp'] = stint_weather['TRACK_TEMP'].mean() if not stint_weather.empty else 35.0
-#             factors['track_temp_range'] = (stint_weather['TRACK_TEMP'].max() - stint_weather['TRACK_TEMP'].min()) if not stint_weather.empty else 5.0
-#             factors['avg_air_temp'] = stint_weather['AIR_TEMP'].mean() if not stint_weather.empty else 25.0
-#         else:
-#             factors['avg_track_temp'] = 35.0
-#             factors['track_temp_range'] = 5.0
-#             factors['avg_air_temp'] = 25.0
-
-#         track_name = stint_laps['meta_event'].iloc[0] if 'meta_event' in stint_laps.columns else 'unknown'
-#         factors['track_abrasiveness'] = self._get_track_abrasiveness(track_name)
-#         return factors
-
-#     def _calculate_driving_factors(self, stint_laps: pd.DataFrame, telemetry_data: pd.DataFrame) -> dict:
-#         factors = {}
-#         if not telemetry_data.empty:
-#             stint_telemetry = telemetry_data[
-#                 telemetry_data['lap'].between(stint_laps['LAP_NUMBER'].min(), stint_laps['LAP_NUMBER'].max())
-#             ]
-#             factors['avg_lateral_g'] = stint_telemetry['accy_can'].abs().mean() if 'accy_can' in stint_telemetry.columns else 0.5
-#             factors['avg_brake_pressure'] = ((stint_telemetry.get('pbrake_f', 0) + stint_telemetry.get('pbrake_r', 0))/2).mean() if not stint_telemetry.empty else 50.0
-#             factors['avg_throttle_usage'] = stint_telemetry['aps'].mean() if 'aps' in stint_telemetry.columns else 60.0
-#             factors['steering_variance'] = stint_telemetry['Steering_Angle'].var() if 'Steering_Angle' in stint_telemetry.columns else 10.0
-#         else:
-#             factors['avg_lateral_g'] = 0.5
-#             factors['avg_brake_pressure'] = 50.0
-#             factors['avg_throttle_usage'] = 60.0
-#             factors['steering_variance'] = 10.0
-
-#         factors['stint_length'] = len(stint_laps)
-#         factors['cumulative_laps'] = stint_laps['LAP_NUMBER'].max()
-#         return factors
-
-#     def _calculate_degradation_targets(self, current_stint: pd.DataFrame, next_stint: pd.DataFrame) -> dict:
-#         targets = {}
-#         for i, sector in enumerate(['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'], 1):
-#             if sector in current_stint.columns and sector in next_stint.columns:
-#                 current_avg = current_stint[sector].mean()
-#                 next_avg = next_stint[sector].mean()
-#                 targets[f'degradation_s{i}'] = max(0.001, min(0.5, (next_avg - current_avg) / len(next_stint)))
-#             else:
-#                 targets[f'degradation_s{i}'] = 0.05
-#         current_avg_time = current_stint['LAP_TIME_SECONDS'].mean()
-#         next_avg_time = next_stint['LAP_TIME_SECONDS'].mean()
-#         targets['grip_loss_rate'] = max(0.001, min(1.0, (next_avg_time - current_avg_time) / len(next_stint)))
-#         return targets
-
-#     def _linear_trend_analysis(self, x, y):
-#         if len(x) < 2:
-#             return 0.0, 0.0
-#         try:
-#             slope = np.polyfit(x, y, 1)[0]
-#             r_squared = np.corrcoef(x, y)[0, 1] ** 2
-#             return slope, r_squared
-#         except:
-#             return 0.0, 0.0
-
-#     def _get_track_abrasiveness(self, track_name: str) -> float:
-#         abrasiveness_map = {
-#             'sebring': 0.9, 'barber': 0.8, 'sonoma': 0.7,
-#             'cota': 0.6, 'road-america': 0.5, 'vir': 0.6
-#         }
-#         return abrasiveness_map.get(track_name.lower(), 0.7)
-
-#     # ------------------------------------------------------------
-#     # PREDICTION / FALLBACK
-#     # ------------------------------------------------------------
-#     def predict_degradation(self, features: dict) -> dict:
-#         try:
-#             feature_vector = [features.get(col, 0) for col in self.feature_columns]
-#             feature_array = np.array(feature_vector).reshape(1, -1)
-#             scaled_features = self.scaler.transform(feature_array)
-#             predictions = self.model.predict(scaled_features)[0]
-#             return dict(zip(self.target_columns, predictions))
-#         except:
-#             return self._fallback_degradation(features)
-
-#     def _fallback_degradation(self, features: dict) -> dict:
-#         return {'degradation_s1': 0.05, 'degradation_s2': 0.05, 'degradation_s3': 0.05, 'grip_loss_rate': 0.1}
-
-#     def estimate_optimal_stint_length(self, features: dict, threshold: float = 0.2) -> int:
-#         degradation_rates = self.predict_degradation(features)
-#         avg_degradation = np.mean([degradation_rates['degradation_s1'],
-#                                    degradation_rates['degradation_s2'],
-#                                    degradation_rates['degradation_s3']])
-#         return max(5, min(30, int(threshold / avg_degradation))) if avg_degradation > 0 else 15
-
-#     # ------------------------------------------------------------
-#     # MODEL SERIALIZATION
-#     # ------------------------------------------------------------
-#     def save_model(self, filepath: str):
-#         joblib.dump({
-#             'model': self.model,
-#             'scaler': self.scaler,
-#             'feature_columns': self.feature_columns,
-#             'target_columns': self.target_columns
-#         }, filepath)
-
-#     def load_model(self, filepath: str):
-#         data = joblib.load(filepath)
-#         self.model = data['model']
-#         self.scaler = data['scaler']
-#         self.feature_columns = data['feature_columns']
-#         self.target_columns = data['target_columns']
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# import pandas as pd
-# import numpy as np
-# from sklearn.ensemble import RandomForestRegressor
-# from sklearn.model_selection import train_test_split
-# from sklearn.preprocessing import StandardScaler
-# from sklearn.multioutput import MultiOutputRegressor
-# import joblib
-
-# class TireModelTrainer:
-#     def __init__(self):
-#         self.model = MultiOutputRegressor(RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1))
-#         self.scaler = StandardScaler()
-#         self.feature_columns = []
-#         self.target_columns = ['degradation_s1', 'degradation_s2', 'degradation_s3', 'grip_loss_rate']
-    
-#     def train(self, lap_data: pd.DataFrame, telemetry_data: pd.DataFrame, weather_data: pd.DataFrame) -> dict:
-#         """Train comprehensive tire degradation model using multi-source data"""
-#         if lap_data.empty:
-#             return {'error': 'No lap data provided'}
-        
-#         # Extract realistic tire degradation features
-#         features_df, targets_df = self._extract_tire_features(lap_data, telemetry_data, weather_data)
-        
-#         if features_df.empty or targets_df.empty:
-#             return {'error': 'No valid tire features extracted'}
-        
-#         # Prepare training data
-#         X = features_df
-#         y = targets_df[self.target_columns]
-        
-#         # Remove any rows with NaN values
-#         valid_mask = ~X.isna().any(axis=1) & ~y.isna().any(axis=1)
-#         X = X[valid_mask]
-#         y = y[valid_mask]
-        
-#         if len(X) < 20:
-#             return {'error': f'Insufficient training samples: {len(X)}'}
-        
-#         # Scale features
-#         X_scaled = self.scaler.fit_transform(X)
-#         self.feature_columns = X.columns.tolist()
-        
-#         # Train multi-output model
-#         X_train, X_test, y_train, y_test = train_test_split(
-#             X_scaled, y, test_size=0.2, random_state=42
-#         )
-        
-#         self.model.fit(X_train, y_train)
-        
-#         # Evaluate
-#         train_score = self.model.score(X_train, y_train)
-#         test_score = self.model.score(X_test, y_test)
-        
-#         # Calculate feature importance across all targets
-#         avg_feature_importance = np.mean([est.feature_importances_ for est in self.model.estimators_], axis=0)
-#         feature_importance = dict(zip(self.feature_columns, avg_feature_importance))
-        
-#         return {
-#             'model': self,
-#             'features': self.feature_columns,
-#             'targets': self.target_columns,
-#             'train_score': train_score,
-#             'test_score': test_score,
-#             'feature_importance': feature_importance,
-#             'training_samples': len(X)
-#         }
-    
-#     def _extract_tire_features(self, lap_data: pd.DataFrame, telemetry_data: pd.DataFrame, 
-#                              weather_data: pd.DataFrame) -> tuple:
-#         """Extract realistic tire degradation features from multi-source data"""
-#         features_list = []
-#         targets_list = []
-        
-#         # Group by car and session to analyze tire performance over stints
-#         for (car_number, session), car_laps in lap_data.groupby(['NUMBER', 'meta_session']):
-#             car_laps = car_laps.sort_values('LAP_NUMBER')
-            
-#             if len(car_laps) < 8:  # Need sufficient laps for degradation analysis
-#                 continue
-            
-#             # Get corresponding telemetry and weather data
-#             car_telemetry = telemetry_data[
-#                 (telemetry_data['vehicle_number'] == car_number) & 
-#                 (telemetry_data['meta_session'] == session)
-#             ] if not telemetry_data.empty else pd.DataFrame()
-            
-#             session_weather = weather_data[
-#                 weather_data['meta_session'] == session
-#             ] if not weather_data.empty else pd.DataFrame()
-            
-#             # Calculate tire performance metrics over stint
-#             stint_features, stint_targets = self._analyze_stint_performance(
-#                 car_laps, car_telemetry, session_weather
+#             # Validate input data structure
+#             if not isinstance(processed_data, dict) or len(processed_data) < 2:
+#                 return {'error': 'Insufficient tracks for tire model', 'status': 'error'}
+
+#             features_list = []
+#             targets_list = []
+
+#             # Process each track's data
+#             for track_name, track_data in processed_data.items():
+#                 if not self._validate_track_data(track_data):
+#                     continue
+                    
+#                 track_features, track_targets = self._extract_track_tire_features(track_data, track_name)
+#                 if not track_features.empty and not track_targets.empty:
+#                     features_list.append(track_features)
+#                     targets_list.append(track_targets)
+
+#             if not features_list:
+#                 return {'error': 'No valid tire training data extracted', 'status': 'error'}
+
+#             # Combine all track data
+#             X = pd.concat(features_list, ignore_index=True)
+#             y = pd.concat(targets_list, ignore_index=True)[self.target_columns]
+
+#             if X.empty or y.empty:
+#                 return {'error': 'Empty feature or target matrices', 'status': 'error'}
+
+#             # Clean data
+#             valid_mask = ~X.isna().any(axis=1) & ~y.isna().any(axis=1)
+#             X = X[valid_mask]
+#             y = y[valid_mask]
+
+#             if len(X) < 20:
+#                 return {'error': f'Insufficient training samples: {len(X)}', 'status': 'error'}
+
+#             # Scale features and train
+#             X_scaled = self.scaler.fit_transform(X)
+#             self.feature_columns = X.columns.tolist()
+
+#             X_train, X_test, y_train, y_test = train_test_split(
+#                 X_scaled, y, test_size=0.2, random_state=42
 #             )
             
-#             if stint_features and stint_targets:
+#             self.model.fit(X_train, y_train)
+#             train_score = self.model.score(X_train, y_train)
+#             test_score = self.model.score(X_test, y_test)
+            
+#             # Calculate average feature importance across all outputs
+#             avg_feature_importance = np.mean([est.feature_importances_ for est in self.model.estimators_], axis=0)
+#             feature_importance = dict(zip(self.feature_columns, avg_feature_importance))
+
+#             return {
+#                 'model': self,
+#                 'features': self.feature_columns,
+#                 'targets': self.target_columns,
+#                 'train_score': train_score,
+#                 'test_score': test_score,
+#                 'feature_importance': feature_importance,
+#                 'training_samples': len(X),
+#                 'status': 'success'
+#             }
+            
+#         except Exception as e:
+#             return {'error': f'Training failed: {str(e)}', 'status': 'error'}
+
+#     def _validate_track_data(self, track_data: Dict[str, pd.DataFrame]) -> bool:
+#         """Validate that track data has required components for tire analysis"""
+#         pit_data = track_data.get('pit_data', pd.DataFrame())
+#         telemetry_data = track_data.get('telemetry_data', pd.DataFrame())
+        
+#         if pit_data.empty:
+#             return False
+            
+#         # Check for required columns
+#         missing_pit = [col for col in self.required_pit_cols if col not in pit_data.columns]
+        
+#         return len(missing_pit) == 0
+
+#     def _extract_track_tire_features(self, track_data: Dict[str, pd.DataFrame], track_name: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+#         """
+#         Extract tire degradation features for all cars in a track
+#         """
+#         pit_data = track_data['pit_data']
+#         telemetry_data = track_data.get('telemetry_data', pd.DataFrame())
+#         weather_data = track_data.get('weather_data', pd.DataFrame())
+
+#         features_list = []
+#         targets_list = []
+
+#         # Process each car's stint patterns
+#         for car_number in pit_data['NUMBER'].unique():
+#             car_laps = pit_data[pit_data['NUMBER'] == car_number].sort_values('LAP_NUMBER')
+#             if len(car_laps) < 5:  # Need sufficient laps for degradation analysis
+#                 continue
+
+#             # Analyze stint patterns (groups of consecutive laps)
+#             stint_features, stint_targets = self._analyze_car_stints(car_laps, telemetry_data, weather_data, track_name)
+            
+#             if not stint_features.empty and not stint_targets.empty:
 #                 features_list.append(stint_features)
 #                 targets_list.append(stint_targets)
-        
-#         if features_list:
+
+#         if features_list and targets_list:
 #             return pd.concat(features_list, ignore_index=True), pd.concat(targets_list, ignore_index=True)
 #         return pd.DataFrame(), pd.DataFrame()
-    
-#     def _analyze_stint_performance(self, car_laps: pd.DataFrame, telemetry_data: pd.DataFrame,
-#                                  weather_data: pd.DataFrame) -> tuple:
-#         """Analyze tire performance throughout a driving stint"""
+
+#     def _analyze_car_stints(self, car_laps: pd.DataFrame, telemetry_data: pd.DataFrame, 
+#                            weather_data: pd.DataFrame, track_name: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+#         """
+#         Analyze tire degradation across different stints for a single car
+#         """
 #         features = []
 #         targets = []
         
-#         # Analyze degradation over consecutive lap windows
-#         window_size = 5
-#         for start_lap in range(0, len(car_laps) - window_size):
-#             end_lap = start_lap + window_size
-#             stint_laps = car_laps.iloc[start_lap:end_lap]
+#         # Convert lap times to seconds for analysis
+#         car_laps = car_laps.copy()
+#         car_laps['LAP_TIME_SECONDS'] = car_laps['LAP_TIME'].apply(self._lap_time_to_seconds)
+        
+#         # Use a sliding window to analyze degradation patterns
+#         window_size = min(5, len(car_laps) - 1)
+        
+#         for i in range(len(car_laps) - window_size):
+#             current_stint = car_laps.iloc[i:i + window_size]
+#             next_stint = car_laps.iloc[i + window_size:min(i + window_size * 2, len(car_laps))]
             
-#             if len(stint_laps) < window_size:
+#             if len(next_stint) < 2:  # Need at least 2 laps for target calculation
 #                 continue
-            
-#             # Calculate degradation metrics for this stint window
-#             degradation_metrics = self._calculate_degradation_metrics(stint_laps, telemetry_data)
-#             condition_factors = self._calculate_condition_factors(stint_laps, weather_data)
-#             driving_factors = self._calculate_driving_factors(stint_laps, telemetry_data)
-            
-#             # Combine all features
-#             stint_features = {**degradation_metrics, **condition_factors, **driving_factors}
-            
-#             # Calculate targets (degradation rates for next window)
-#             if end_lap + window_size <= len(car_laps):
-#                 next_stint = car_laps.iloc[end_lap:end_lap + window_size]
-#                 degradation_targets = self._calculate_degradation_targets(stint_laps, next_stint)
                 
-#                 features.append(pd.DataFrame([stint_features]))
-#                 targets.append(pd.DataFrame([degradation_targets]))
+#             # Extract features from current stint
+#             stint_features = self._calculate_stint_features(current_stint, telemetry_data, weather_data, track_name)
+            
+#             # Calculate degradation targets from next stint
+#             degradation_targets = self._calculate_degradation_targets(current_stint, next_stint)
+            
+#             features.append(pd.DataFrame([stint_features]))
+#             targets.append(pd.DataFrame([degradation_targets]))
         
-#         if features:
+#         if features and targets:
 #             return pd.concat(features, ignore_index=True), pd.concat(targets, ignore_index=True)
-#         return None, None
-    
-#     def _calculate_degradation_metrics(self, stint_laps: pd.DataFrame, telemetry_data: pd.DataFrame) -> dict:
-#         """Calculate tire degradation metrics from lap data"""
-#         metrics = {}
+#         return pd.DataFrame(), pd.DataFrame()
+
+#     def _calculate_stint_features(self, stint_laps: pd.DataFrame, telemetry_data: pd.DataFrame,
+#                                 weather_data: pd.DataFrame, track_name: str) -> Dict[str, float]:
+#         """Calculate tire degradation features from a stint"""
+#         features = {}
         
-#         # Lap time progression (primary degradation indicator)
+#         # Lap time degradation analysis
 #         lap_times = stint_laps['LAP_TIME_SECONDS'].values
 #         lap_numbers = stint_laps['LAP_NUMBER'].values
         
-#         try:
+#         # Linear degradation trend
+#         if len(lap_times) > 1:
 #             time_slope, time_r2 = self._linear_trend_analysis(lap_numbers, lap_times)
-#             metrics['lap_time_slope'] = time_slope
-#             metrics['lap_time_consistency'] = time_r2
-#         except:
-#             metrics['lap_time_slope'] = 0.0
-#             metrics['lap_time_consistency'] = 0.0
-        
+#             features['lap_time_degradation_slope'] = max(0.0, time_slope)  # Positive = degradation
+#             features['lap_time_consistency'] = time_r2
+#         else:
+#             features['lap_time_degradation_slope'] = 0.1
+#             features['lap_time_consistency'] = 0.0
+            
 #         # Sector-specific degradation
-#         if all(col in stint_laps.columns for col in ['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS']):
-#             for i, sector in enumerate(['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'], 1):
-#                 sector_times = stint_laps[sector].values
-#                 try:
+#         for i, sector in enumerate(['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'], 1):
+#             if sector in stint_laps.columns:
+#                 sector_times = pd.to_numeric(stint_laps[sector], errors='coerce').fillna(0).values
+#                 if len(sector_times) > 1:
 #                     sector_slope, _ = self._linear_trend_analysis(lap_numbers, sector_times)
-#                     metrics[f'sector_{i}_slope'] = sector_slope
-#                 except:
-#                     metrics[f'sector_{i}_slope'] = 0.0
-#         else:
-#             for i in range(1, 4):
-#                 metrics[f'sector_{i}_slope'] = 0.0
-        
-#         # Performance variance (indicates grip loss)
-#         metrics['lap_time_variance'] = np.var(lap_times)
-#         metrics['best_to_worst_ratio'] = np.min(lap_times) / np.max(lap_times)
-        
-#         return metrics
-    
-#     def _calculate_condition_factors(self, stint_laps: pd.DataFrame, weather_data: pd.DataFrame) -> dict:
-#         """Calculate environmental condition factors affecting tires"""
-#         factors = {}
-        
-#         if not weather_data.empty:
-#             # Use weather data from stint period
-#             stint_start = stint_laps['timestamp'].min()
-#             stint_end = stint_laps['timestamp'].max()
-            
-#             stint_weather = weather_data[
-#                 (weather_data['timestamp'] >= stint_start) & 
-#                 (weather_data['timestamp'] <= stint_end)
-#             ]
-            
-#             if not stint_weather.empty:
-#                 factors['avg_track_temp'] = stint_weather['TRACK_TEMP'].mean()
-#                 factors['track_temp_range'] = stint_weather['TRACK_TEMP'].max() - stint_weather['TRACK_TEMP'].min()
-#                 factors['avg_air_temp'] = stint_weather['AIR_TEMP'].mean()
+#                     features[f'sector_{i}_degradation_slope'] = max(0.0, sector_slope)
+#                 else:
+#                     features[f'sector_{i}_degradation_slope'] = 0.05
 #             else:
-#                 factors['avg_track_temp'] = 35.0
-#                 factors['track_temp_range'] = 5.0
-#                 factors['avg_air_temp'] = 25.0
-#         else:
-#             factors['avg_track_temp'] = 35.0
-#             factors['track_temp_range'] = 5.0
-#             factors['avg_air_temp'] = 25.0
+#                 features[f'sector_{i}_degradation_slope'] = 0.05
         
-#         # Track abrasiveness (simplified)
-#         track_name = stint_laps['meta_event'].iloc[0] if 'meta_event' in stint_laps.columns else 'unknown'
-#         factors['track_abrasiveness'] = self._get_track_abrasiveness(track_name)
+#         # Performance metrics
+#         features['lap_time_variance'] = np.var(lap_times) if len(lap_times) > 1 else 1.0
+#         features['performance_consistency'] = 1.0 / (1.0 + features['lap_time_variance'])
         
-#         return factors
-    
-#     def _calculate_driving_factors(self, stint_laps: pd.DataFrame, telemetry_data: pd.DataFrame) -> dict:
-#         """Calculate driving style factors affecting tire wear"""
-#         factors = {}
+#         # Track and condition factors
+#         features.update(self._calculate_track_conditions(stint_laps, weather_data, track_name))
         
-#         if not telemetry_data.empty:
-#             # Analyze telemetry for driving style indicators
-#             stint_telemetry = telemetry_data[
-#                 telemetry_data['lap'].between(stint_laps['LAP_NUMBER'].min(), stint_laps['LAP_NUMBER'].max())
-#             ]
-            
-#             if not stint_telemetry.empty:
-#                 # Cornering loads
-#                 lateral_g = stint_telemetry['accy_can'].abs().mean()
-#                 factors['avg_lateral_g'] = lateral_g
-                
-#                 # Braking intensity
-#                 brake_pressure = (stint_telemetry['pbrake_f'] + stint_telemetry['pbrake_r']).mean() / 2
-#                 factors['avg_brake_pressure'] = brake_pressure
-                
-#                 # Throttle usage
-#                 throttle_usage = stint_telemetry['aps'].mean()
-#                 factors['avg_throttle_usage'] = throttle_usage
-                
-#                 # Steering activity
-#                 steering_variance = stint_telemetry['Steering_Angle'].var()
-#                 factors['steering_variance'] = steering_variance if not pd.isna(steering_variance) else 0.0
-#             else:
-#                 factors['avg_lateral_g'] = 0.5
-#                 factors['avg_brake_pressure'] = 50.0
-#                 factors['avg_throttle_usage'] = 60.0
-#                 factors['steering_variance'] = 10.0
-#         else:
-#             factors['avg_lateral_g'] = 0.5
-#             factors['avg_brake_pressure'] = 50.0
-#             factors['avg_throttle_usage'] = 60.0
-#             factors['steering_variance'] = 10.0
+#         # Driving style factors (from telemetry if available)
+#         features.update(self._calculate_driving_factors(stint_laps, telemetry_data))
         
 #         # Stint characteristics
-#         factors['stint_length'] = len(stint_laps)
-#         factors['cumulative_laps'] = stint_laps['LAP_NUMBER'].max()
+#         features['stint_length'] = len(stint_laps)
+#         features['cumulative_laps'] = stint_laps['LAP_NUMBER'].max()
         
+#         return features
+
+#     def _calculate_track_conditions(self, stint_laps: pd.DataFrame, weather_data: pd.DataFrame, 
+#                                   track_name: str) -> Dict[str, float]:
+#         """Calculate track and weather conditions affecting tire wear"""
+#         conditions = {}
+        
+#         # Track characteristics
+#         conditions['track_abrasiveness'] = self._get_track_abrasiveness(track_name)
+#         conditions['track_length_factor'] = self._get_track_length_factor(track_name)
+        
+#         # Weather conditions
+#         if not weather_data.empty:
+#             # Use average weather during stint period (simplified)
+#             conditions['avg_track_temp'] = weather_data['TRACK_TEMP'].mean() if 'TRACK_TEMP' in weather_data.columns else 35.0
+#             conditions['track_temp_variance'] = weather_data['TRACK_TEMP'].var() if 'TRACK_TEMP' in weather_data.columns else 5.0
+#             conditions['avg_air_temp'] = weather_data['AIR_TEMP'].mean() if 'AIR_TEMP' in weather_data.columns else 25.0
+#         else:
+#             conditions['avg_track_temp'] = 35.0
+#             conditions['track_temp_variance'] = 5.0
+#             conditions['avg_air_temp'] = 25.0
+            
+#         return conditions
+
+#     def _calculate_driving_factors(self, stint_laps: pd.DataFrame, telemetry_data: pd.DataFrame) -> Dict[str, float]:
+#         """Calculate driving style factors from telemetry data"""
+#         factors = {
+#             'estimated_lateral_force': 0.5,
+#             'estimated_braking_force': 0.3,
+#             'driving_aggressiveness': 0.6
+#         }
+        
+#         if not telemetry_data.empty:
+#             car_number = stint_laps['NUMBER'].iloc[0]
+#             stint_lap_numbers = stint_laps['LAP_NUMBER'].values
+            
+#             # Filter telemetry for this car and stint laps
+#             car_telemetry = telemetry_data[
+#                 (telemetry_data['vehicle_id'].str.contains(str(car_number))) &
+#                 (telemetry_data['lap'].isin(stint_lap_numbers))
+#             ]
+            
+#             if not car_telemetry.empty:
+#                 # Estimate lateral forces from lateral acceleration
+#                 if 'accy_can' in car_telemetry.columns:
+#                     factors['estimated_lateral_force'] = car_telemetry['accy_can'].abs().mean()
+                
+#                 # Estimate braking from longitudinal acceleration
+#                 if 'accx_can' in car_telemetry.columns:
+#                     braking_events = car_telemetry[car_telemetry['accx_can'] < -0.5]
+#                     factors['estimated_braking_force'] = len(braking_events) / len(car_telemetry) if len(car_telemetry) > 0 else 0.3
+                
+#                 # Driving aggressiveness (speed variance + acceleration patterns)
+#                 if 'speed' in car_telemetry.columns:
+#                     speed_variance = car_telemetry['speed'].var()
+#                     factors['driving_aggressiveness'] = min(1.0, speed_variance / 1000.0)  # Normalized
+                    
 #         return factors
-    
-#     def _calculate_degradation_targets(self, current_stint: pd.DataFrame, next_stint: pd.DataFrame) -> dict:
-#         """Calculate actual degradation targets by comparing stints"""
+
+#     def _calculate_degradation_targets(self, current_stint: pd.DataFrame, next_stint: pd.DataFrame) -> Dict[str, float]:
+#         """Calculate actual degradation observed between stints"""
 #         targets = {}
         
-#         # Calculate degradation rates between stints for each sector
+#         # Sector degradation (time increase per lap)
 #         for i, sector in enumerate(['S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS'], 1):
 #             if sector in current_stint.columns and sector in next_stint.columns:
-#                 current_avg = current_stint[sector].mean()
-#                 next_avg = next_stint[sector].mean()
-#                 degradation_rate = (next_avg - current_avg) / len(next_stint)
-#                 targets[f'degradation_s{i}'] = max(0.001, min(0.5, degradation_rate))
+#                 current_avg = pd.to_numeric(current_stint[sector], errors='coerce').mean()
+#                 next_avg = pd.to_numeric(next_stint[sector], errors='coerce').mean()
+#                 degradation_per_lap = (next_avg - current_avg) / len(next_stint)
+#                 targets[f'degradation_s{i}'] = max(0.001, min(0.5, degradation_per_lap))
 #             else:
-#                 targets[f'degradation_s{i}'] = 0.05  # Default moderate degradation
+#                 targets[f'degradation_s{i}'] = 0.05
         
 #         # Overall grip loss rate
 #         current_avg_time = current_stint['LAP_TIME_SECONDS'].mean()
@@ -1479,132 +760,117 @@ class TireModelTrainer:
 #         targets['grip_loss_rate'] = max(0.001, min(1.0, grip_loss))
         
 #         return targets
-    
-#     def _linear_trend_analysis(self, x, y):
-#         """Perform linear regression trend analysis"""
+
+#     def _linear_trend_analysis(self, x: np.ndarray, y: np.ndarray) -> Tuple[float, float]:
+#         """Calculate linear trend slope and R² value"""
 #         if len(x) < 2:
 #             return 0.0, 0.0
-        
 #         try:
 #             slope = np.polyfit(x, y, 1)[0]
-#             # Calculate R-squared
-#             correlation_matrix = np.corrcoef(x, y)
-#             r_squared = correlation_matrix[0, 1] ** 2
+#             correlation = np.corrcoef(x, y)[0, 1]
+#             r_squared = correlation ** 2 if not np.isnan(correlation) else 0.0
 #             return slope, r_squared
 #         except:
 #             return 0.0, 0.0
-    
+
 #     def _get_track_abrasiveness(self, track_name: str) -> float:
-#         """Get track-specific abrasiveness factor"""
-#         abrasiveness_map = {
-#             'sebring': 0.9, 'barber': 0.8, 'sonoma': 0.7,
-#             'cota': 0.6, 'road-america': 0.5, 'vir': 0.6
-#         }
-#         return abrasiveness_map.get(track_name.lower(), 0.7)
-    
-#     def predict_degradation(self, features: dict) -> dict:
-#         """Predict tire degradation rates for given conditions"""
+#         """Estimate track abrasiveness based on track characteristics"""
+#         high_abrasion = ['sebring', 'sonoma', 'interlagos']
+#         medium_abrasion = ['cota', 'silverstone', 'suzuka']
+#         low_abrasion = ['monaco', 'hungaroring', 'sochi']
+        
+#         track_lower = track_name.lower()
+#         if any(track in track_lower for track in high_abrasion):
+#             return 0.8
+#         elif any(track in track_lower for track in medium_abrasion):
+#             return 0.5
+#         elif any(track in track_lower for track in low_abrasion):
+#             return 0.3
+#         else:
+#             return 0.6  # Default medium
+
+#     def _get_track_length_factor(self, track_name: str) -> float:
+#         """Normalize by track length (simplified)"""
+#         long_tracks = ['spa', 'suzuka', 'silverstone']
+#         short_tracks = ['monaco', 'hungaroring', 'sochi']
+        
+#         track_lower = track_name.lower()
+#         if any(track in track_lower for track in long_tracks):
+#             return 1.2
+#         elif any(track in track_lower for track in short_tracks):
+#             return 0.8
+#         else:
+#             return 1.0
+
+#     def _lap_time_to_seconds(self, lap_time: str) -> float:
+#         """Convert lap time string to seconds"""
 #         try:
-#             # Create feature vector in correct order
-#             feature_vector = [features.get(col, 0) for col in self.feature_columns]
-#             feature_array = np.array(feature_vector).reshape(1, -1)
+#             if ':' in lap_time:
+#                 parts = lap_time.split(':')
+#                 if len(parts) == 2:
+#                     return float(parts[0]) * 60 + float(parts[1])
+#             return float(lap_time)
+#         except:
+#             return 60.0
+
+#     def predict_tire_degradation(self, features: Dict[str, float]) -> Dict[str, float]:
+#         """Predict tire degradation rates for given features"""
+#         try:
+#             if not self.feature_columns:
+#                 return self._get_fallback_degradation()
+                
+#             # Ensure all features are present
+#             feature_vector = [features.get(col, 0.0) for col in self.feature_columns]
+#             X = np.array(feature_vector).reshape(1, -1)
+#             X_scaled = self.scaler.transform(X)
             
-#             # Scale features and predict
-#             scaled_features = self.scaler.transform(feature_array)
-#             predictions = self.model.predict(scaled_features)[0]
-            
+#             predictions = self.model.predict(X_scaled)[0]
 #             return dict(zip(self.target_columns, predictions))
-#         except Exception as e:
-#             print(f"Degradation prediction error: {e}")
-#             return self._fallback_degradation(features)
-    
-#     def _fallback_degradation(self, features: dict) -> dict:
-#         """Fallback degradation estimation"""
+            
+#         except Exception:
+#             return self._get_fallback_degradation()
+
+#     def _get_fallback_degradation(self) -> Dict[str, float]:
+#         """Fallback degradation rates when model is unavailable"""
 #         return {
 #             'degradation_s1': 0.05,
-#             'degradation_s2': 0.05,
+#             'degradation_s2': 0.05, 
 #             'degradation_s3': 0.05,
 #             'grip_loss_rate': 0.1
 #         }
-    
-#     def estimate_optimal_stint_length(self, features: dict, threshold: float = 0.2) -> int:
-#         """Estimate optimal stint length before significant performance drop"""
-#         degradation_rates = self.predict_degradation(features)
-#         avg_degradation = np.mean([degradation_rates['degradation_s1'], 
-#                                  degradation_rates['degradation_s2'], 
-#                                  degradation_rates['degradation_s3']])
-        
-#         # Calculate laps until performance drops by threshold seconds per lap
-#         if avg_degradation > 0:
-#             optimal_laps = int(threshold / avg_degradation)
-#             return max(5, min(30, optimal_laps))  # Reasonable bounds
-#         return 15  # Default stint length
-    
+
+#     def estimate_optimal_stint_length(self, features: Dict[str, float], performance_threshold: float = 0.2) -> int:
+#         """Estimate optimal stint length before tire performance drops below threshold"""
+#         try:
+#             degradation_rates = self.predict_tire_degradation(features)
+#             avg_degradation = np.mean([
+#                 degradation_rates['degradation_s1'],
+#                 degradation_rates['degradation_s2'], 
+#                 degradation_rates['degradation_s3']
+#             ])
+            
+#             if avg_degradation <= 0:
+#                 return 20  # Default stint length
+                
+#             optimal_laps = int(performance_threshold / avg_degradation)
+#             return max(5, min(30, optimal_laps))
+            
+#         except Exception:
+#             return 15  # Fallback stint length
+
 #     def save_model(self, filepath: str):
-#         """Save trained model and scaler"""
-#         model_data = {
+#         """Save trained model to file"""
+#         joblib.dump({
 #             'model': self.model,
 #             'scaler': self.scaler,
 #             'feature_columns': self.feature_columns,
 #             'target_columns': self.target_columns
-#         }
-#         joblib.dump(model_data, filepath)
-    
+#         }, filepath)
+
 #     def load_model(self, filepath: str):
-#         """Load trained model and scaler"""
-#         model_data = joblib.load(filepath)
-#         self.model = model_data['model']
-#         self.scaler = model_data['scaler']
-#         self.feature_columns = model_data['feature_columns']
-#         self.target_columns = model_data['target_columns']
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# from sklearn.ensemble import RandomForestRegressor
-# from sklearn.model_selection import train_test_split
-# import pandas as pd
-# import joblib
-
-# class TireModelTrainer:
-#     def __init__(self):
-#         self.model = RandomForestRegressor(n_estimators=100, random_state=42)
-    
-#     def train(self, lap_data: pd.DataFrame) -> dict:
-#         """Train tire degradation model"""
-#         # Prepare features
-#         features = ['LAP_NUMBER', 'S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS']
-#         X = lap_data[features].dropna()
-#         y = lap_data.loc[X.index, 'LAP_TIME_SECONDS']
-        
-#         # Train model
-#         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
-#         self.model.fit(X_train, y_train)
-        
-#         # Evaluate
-#         train_score = self.model.score(X_train, y_train)
-#         test_score = self.model.score(X_test, y_test)
-        
-#         return {
-#             'model': self.model,
-#             'features': features,
-#             'train_score': train_score,
-#             'test_score': test_score
-#         }
-    
-#     def save_model(self, filepath: str):
-#         """Save trained model"""
-#         joblib.dump(self.model, filepath)
+#         """Load trained model from file"""
+#         data = joblib.load(filepath)
+#         self.model = data['model']
+#         self.scaler = data['scaler']
+#         self.feature_columns = data['feature_columns']
+#         self.target_columns = data['target_columns']

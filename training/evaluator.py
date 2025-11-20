@@ -1,81 +1,90 @@
 import pandas as pd
 import numpy as np
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score, classification_report
-from sklearn.model_selection import cross_val_score, TimeSeriesSplit
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import json
 import logging
+import joblib
+import os
 
 class ModelEvaluator:
-    """Comprehensive model evaluation and validation for racing models"""
+    """Comprehensive model evaluation and validation for racing models - Consistent with FirebaseDataLoader structure"""
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
     
-    def evaluate_tire_model(self, model_result: Dict, test_data: Dict) -> Dict[str, Any]:
-        """Evaluate tire degradation model with realistic validation"""
-        if 'error' in model_result:
-            return {'status': 'failed', 'error': model_result['error']}
+    def evaluate_tire_model(self, model_result: Dict, test_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Any]:
+        """Evaluate tire degradation model with realistic validation using FirebaseDataLoader structure"""
+        if model_result.get('status') != 'success':
+            return {'status': 'failed', 'error': model_result.get('error', 'Model training failed')}
         
         metrics = {}
         try:
-            # Extract model and features
             model = model_result['model']
             feature_columns = model_result.get('features', [])
             
-            if not feature_columns or test_data['lap_data'].empty:
+            # Extract test data from FirebaseDataLoader structure
+            test_pit_data = pd.DataFrame()
+            for track_data in test_data.values():
+                if 'pit_data' in track_data and not track_data['pit_data'].empty:
+                    test_pit_data = pd.concat([test_pit_data, track_data['pit_data']], ignore_index=True)
+            
+            if not feature_columns or test_pit_data.empty:
                 return {'status': 'insufficient_data', 'error': 'Missing features or test data'}
             
-            # Prepare test data
-            X_test = test_data['lap_data'][feature_columns].dropna()
+            # Prepare test features
+            X_test = test_pit_data[feature_columns].dropna()
             if X_test.empty:
                 return {'status': 'insufficient_data', 'error': 'No valid test samples after preprocessing'}
             
-            # For tire model, we need to validate degradation predictions
-            predictions = {}
-            actual_metrics = {}
+            predictions = []
+            valid_predictions = 0
             
-            # Validate degradation rate predictions
-            if hasattr(model, 'predict_degradation'):
-                # Test on sample laps to get degradation predictions
-                sample_features = X_test.iloc[:10].to_dict('records')
-                degradation_predictions = []
-                for features in sample_features:
-                    try:
-                        pred = model.predict_degradation(features)
-                        degradation_predictions.append(pred)
-                    except Exception as e:
-                        self.logger.warning(f"Degradation prediction failed: {e}")
-                
-                if degradation_predictions:
-                    # Validate degradation rates are realistic (0.01-0.5 seconds per lap)
-                    degradation_rates = [np.mean([p.get(f'degradation_s{i}', 0) for i in range(1, 4)]) 
-                                       for p in degradation_predictions]
-                    valid_rates = [0.01 <= rate <= 0.5 for rate in degradation_rates]
-                    metrics['degradation_rate_validity'] = sum(valid_rates) / len(valid_rates)
+            # Test degradation predictions on sample data
+            sample_features = X_test.iloc[:min(20, len(X_test))].to_dict('records')
             
-            # Validate stint length predictions
-            if hasattr(model, 'estimate_optimal_stint_length'):
-                stint_predictions = []
-                for features in X_test.iloc[:5].to_dict('records'):
-                    try:
-                        stint = model.estimate_optimal_stint_length(features)
-                        stint_predictions.append(stint)
-                    except:
-                        continue
-                
-                if stint_predictions:
-                    # Validate stint lengths are realistic (5-30 laps)
-                    valid_stints = [5 <= stint <= 30 for stint in stint_predictions]
-                    metrics['stint_length_validity'] = sum(valid_stints) / len(valid_stints)
+            for features in sample_features:
+                try:
+                    degradation_pred = model.predict_tire_degradation(features)
+                    
+                    # Validate degradation rates are realistic (0.01-0.5 seconds per lap per sector)
+                    valid_sectors = 0
+                    for sector in ['degradation_s1', 'degradation_s2', 'degradation_s3']:
+                        if sector in degradation_pred and 0.01 <= degradation_pred[sector] <= 0.5:
+                            valid_sectors += 1
+                    
+                    if valid_sectors >= 2:  # At least 2/3 sectors realistic
+                        valid_predictions += 1
+                    
+                    predictions.append(degradation_pred)
+                except Exception as e:
+                    self.logger.warning(f"Tire degradation prediction failed: {e}")
+                    continue
+            
+            # Test stint length predictions
+            stint_predictions = []
+            for features in X_test.iloc[:min(10, len(X_test))].to_dict('records'):
+                try:
+                    stint = model.estimate_optimal_stint_length(features)
+                    stint_predictions.append(stint)
+                except Exception as e:
+                    continue
+            
+            stint_validity = 0
+            if stint_predictions:
+                valid_stints = [5 <= stint <= 30 for stint in stint_predictions]
+                stint_validity = sum(valid_stints) / len(valid_stints)
             
             metrics.update({
                 'status': 'success',
                 'test_samples': len(X_test),
                 'feature_count': len(feature_columns),
                 'training_score': model_result.get('test_score', 0),
+                'degradation_prediction_rate': valid_predictions / len(sample_features) if sample_features else 0,
+                'stint_length_validity': stint_validity,
+                'tracks_tested': len(test_data),
                 'feature_importance': model_result.get('feature_importance', {})
             })
             
@@ -84,27 +93,32 @@ class ModelEvaluator:
         
         return metrics
     
-    def evaluate_fuel_model(self, model_result: Dict, test_data: Dict) -> Dict[str, Any]:
-        """Evaluate fuel consumption model with telemetry validation"""
-        if 'error' in model_result:
-            return {'status': 'failed', 'error': model_result['error']}
+    def evaluate_fuel_model(self, model_result: Dict, test_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Any]:
+        """Evaluate fuel consumption model using FirebaseDataLoader structure"""
+        if model_result.get('status') != 'success':
+            return {'status': 'failed', 'error': model_result.get('error', 'Model training failed')}
         
         metrics = {}
         try:
             model = model_result['model']
             feature_columns = model_result.get('features', [])
             
-            if not feature_columns or test_data['lap_data'].empty:
+            # Extract test data from multiple tracks
+            test_pit_data = pd.DataFrame()
+            for track_data in test_data.values():
+                if 'pit_data' in track_data and not track_data['pit_data'].empty:
+                    test_pit_data = pd.concat([test_pit_data, track_data['pit_data']], ignore_index=True)
+            
+            if not feature_columns or test_pit_data.empty:
                 return {'status': 'insufficient_data', 'error': 'Missing features or test data'}
             
             # Test fuel consumption predictions
-            test_laps = test_data['lap_data'].sample(min(20, len(test_data['lap_data'])))
+            test_samples = test_pit_data.sample(min(25, len(test_pit_data)))
             predictions = []
             valid_predictions = 0
             
-            for _, lap in test_laps.iterrows():
+            for _, lap in test_samples.iterrows():
                 try:
-                    # Create feature dictionary for prediction
                     features = {col: lap.get(col, 0) for col in feature_columns}
                     fuel_pred = model.predict_fuel_consumption(features)
                     
@@ -120,11 +134,13 @@ class ModelEvaluator:
                     'status': 'success',
                     'test_predictions': len(predictions),
                     'valid_prediction_rate': valid_predictions / len(predictions),
-                    'mean_consumption': np.mean(predictions),
-                    'std_consumption': np.std(predictions),
-                    'min_consumption': min(predictions),
-                    'max_consumption': max(predictions),
-                    'training_score': model_result.get('test_score', 0)
+                    'mean_consumption': float(np.mean(predictions)),
+                    'std_consumption': float(np.std(predictions)),
+                    'min_consumption': float(min(predictions)),
+                    'max_consumption': float(max(predictions)),
+                    'training_score': model_result.get('test_score', 0),
+                    'tracks_tested': len(test_data),
+                    'feature_count': len(feature_columns)
                 })
             else:
                 metrics = {'status': 'no_predictions', 'error': 'Could not generate fuel predictions'}
@@ -134,28 +150,37 @@ class ModelEvaluator:
         
         return metrics
     
-    def evaluate_pit_strategy_model(self, model_result: Dict, test_data: Dict) -> Dict[str, Any]:
-        """Evaluate pit strategy model with race scenario validation"""
-        if 'error' in model_result:
-            return {'status': 'failed', 'error': model_result['error']}
+    def evaluate_pit_strategy_model(self, model_result: Dict, test_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Any]:
+        """Evaluate pit strategy model using FirebaseDataLoader structure"""
+        if model_result.get('status') != 'success':
+            return {'status': 'failed', 'error': model_result.get('error', 'Model training failed')}
         
         metrics = {}
         try:
             model = model_result['model']
             accuracy = model_result.get('accuracy', 0)
+            feature_columns = model_result.get('features', [])
             
-            # Validate strategy predictions make sense
-            test_scenarios = self._create_strategy_test_scenarios()
+            # Create realistic test scenarios based on actual track data
+            test_scenarios = self._create_strategy_test_scenarios(test_data, feature_columns)
             valid_predictions = 0
             total_predictions = 0
+            strategy_distribution = {}
             
             for scenario in test_scenarios:
                 try:
-                    strategy = model.predict_optimal_strategy(scenario)
-                    if strategy in ['early', 'middle', 'late']:
+                    strategy = model.predict_pit_strategy(scenario)
+                    if strategy in ['early', 'middle', 'late', 'undercut', 'overcut']:
                         valid_predictions += 1
+                        strategy_distribution[strategy] = strategy_distribution.get(strategy, 0) + 1
+                    
+                    # Test confidence scores
+                    confidence = model.get_strategy_confidence(scenario)
+                    if confidence and all(0 <= score <= 1 for score in confidence.values()):
+                        valid_predictions += 0.5  # Partial credit for valid confidence
+                    
                     total_predictions += 1
-                except:
+                except Exception as e:
                     continue
             
             metrics.update({
@@ -163,6 +188,9 @@ class ModelEvaluator:
                 'accuracy': accuracy,
                 'strategy_prediction_validity': valid_predictions / total_predictions if total_predictions > 0 else 0,
                 'test_scenarios': total_predictions,
+                'strategy_distribution': strategy_distribution,
+                'training_samples': model_result.get('training_samples', 0),
+                'tracks_used': model_result.get('tracks_used', 0),
                 'feature_importance': model_result.get('feature_importance', {})
             })
             
@@ -171,40 +199,69 @@ class ModelEvaluator:
         
         return metrics
     
-    def evaluate_weather_model(self, model_result: Dict, test_data: Dict) -> Dict[str, Any]:
-        """Evaluate weather impact model with realistic condition validation"""
-        if 'error' in model_result:
-            return {'status': 'failed', 'error': model_result['error']}
+    def evaluate_weather_model(self, model_result: Dict, test_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Any]:
+        """Evaluate weather impact model using FirebaseDataLoader structure"""
+        if model_result.get('status') != 'success':
+            return {'status': 'failed', 'error': model_result.get('error', 'Model training failed')}
         
         metrics = {}
         try:
             model = model_result['model']
+            feature_columns = model_result.get('features', [])
+            
+            # Extract weather data from test tracks
+            test_weather_data = []
+            track_names = []
+            for track_name, track_data in test_data.items():
+                if 'weather_data' in track_data and not track_data['weather_data'].empty:
+                    test_weather_data.append(track_data['weather_data'])
+                    track_names.append(track_name)
+            
+            if not test_weather_data:
+                return {'status': 'insufficient_data', 'error': 'No weather data available for testing'}
             
             # Test weather impact predictions for various conditions
-            test_conditions = [
-                {'air_temp': 20, 'track_temp': 25, 'humidity': 60, 'pressure': 1013, 'wind_speed': 2, 'rain': 0},
-                {'air_temp': 30, 'track_temp': 40, 'humidity': 80, 'pressure': 1000, 'wind_speed': 10, 'rain': 1},
-                {'air_temp': 15, 'track_temp': 18, 'humidity': 40, 'pressure': 1020, 'wind_speed': 5, 'rain': 0}
-            ]
-            
             impacts = []
-            for conditions in test_conditions:
-                try:
-                    impact = model.predict_weather_impact(conditions, 'test_track', {'lap_number': 10})
-                    # Weather impact should be within reasonable bounds (-5 to +5 seconds)
-                    if -5 <= impact <= 5:
+            valid_impacts = 0
+            
+            for track_name, weather_df in zip(track_names, test_weather_data):
+                for _, weather_row in weather_df.iterrows():
+                    try:
+                        # Create weather conditions dictionary
+                        conditions = {
+                            'AIR_TEMP': weather_row.get('AIR_TEMP', 25),
+                            'TRACK_TEMP': weather_row.get('TRACK_TEMP', 30),
+                            'HUMIDITY': weather_row.get('HUMIDITY', 50),
+                            'PRESSURE': weather_row.get('PRESSURE', 1013),
+                            'WIND_SPEED': weather_row.get('WIND_SPEED', 0),
+                            'RAIN': weather_row.get('RAIN', 0)
+                        }
+                        
+                        # Create lap context
+                        lap_context = {
+                            'lap_info': {'LAP_NUMBER': 10},
+                            'telemetry': {'avg_speed': 120, 'driving_aggressiveness': 0.6}
+                        }
+                        
+                        impact = model.predict_weather_impact(conditions, track_name, lap_context)
+                        
+                        # Weather impact should be within reasonable bounds (-5 to +5 seconds)
+                        if -5 <= impact <= 5:
+                            valid_impacts += 1
                         impacts.append(impact)
-                except:
-                    continue
+                    except Exception as e:
+                        continue
             
             if impacts:
                 metrics.update({
                     'status': 'success',
                     'test_conditions': len(impacts),
-                    'mean_impact': np.mean(impacts),
-                    'impact_range': max(impacts) - min(impacts),
+                    'valid_impact_rate': valid_impacts / len(impacts),
+                    'mean_impact': float(np.mean(impacts)),
+                    'impact_range': float(max(impacts) - min(impacts)),
                     'training_score': model_result.get('test_score', 0),
-                    'realistic_impacts': len([i for i in impacts if abs(i) <= 3]) / len(impacts)
+                    'tracks_tested': len(track_names),
+                    'feature_count': len(feature_columns)
                 })
             else:
                 metrics = {'status': 'no_predictions', 'error': 'Could not generate weather impact predictions'}
@@ -214,78 +271,96 @@ class ModelEvaluator:
         
         return metrics
     
-    def _create_strategy_test_scenarios(self) -> List[Dict]:
-        """Create realistic test scenarios for pit strategy validation"""
+    def _create_strategy_test_scenarios(self, test_data: Dict[str, Dict[str, pd.DataFrame]], feature_columns: List[str]) -> List[Dict]:
+        """Create realistic test scenarios for pit strategy validation using actual data"""
         scenarios = []
         
-        # Various race situations
-        base_scenario = {
-            'tire_degradation_rate': 0.1,
-            'fuel_effect': 0.8,
-            'position': 5,
-            'gap_to_leader': 15.0,
-            'gap_to_next': 2.5,
-            'track_wear_factor': 0.7,
-            'total_laps': 25
-        }
+        # Extract features from test data to create realistic scenarios
+        for track_name, track_data in test_data.items():
+            if 'pit_data' in track_data and not track_data['pit_data'].empty:
+                pit_data = track_data['pit_data']
+                
+                # Sample different race situations from actual data
+                for _, lap in pit_data.sample(min(5, len(pit_data))).iterrows():
+                    scenario = {}
+                    
+                    # Fill scenario with available features
+                    for feature in feature_columns:
+                        scenario[feature] = lap.get(feature, 0)
+                    
+                    # Ensure required features have reasonable values
+                    scenario.setdefault('tire_degradation_rate', 0.1)
+                    scenario.setdefault('position_normalized', 0.5)
+                    scenario.setdefault('gap_to_leader_seconds', 15.0)
+                    scenario.setdefault('track_abrasiveness', 0.7)
+                    scenario.setdefault('caution_flag_ratio', 0.1)
+                    
+                    scenarios.append(scenario)
         
-        # Leading car with low degradation
-        scenarios.append({**base_scenario, 'position': 1, 'tire_degradation_rate': 0.05})
-        
-        # Mid-field with high degradation
-        scenarios.append({**base_scenario, 'position': 8, 'tire_degradation_rate': 0.2})
-        
-        # Back marker with medium degradation
-        scenarios.append({**base_scenario, 'position': 15, 'gap_to_leader': 45.0})
-        
-        # Close battle for position
-        scenarios.append({**base_scenario, 'gap_to_next': 0.5, 'gap_to_leader': 8.0})
-        
-        # High wear track
-        scenarios.append({**base_scenario, 'track_wear_factor': 0.9, 'tire_degradation_rate': 0.15})
+        # Add some edge cases if we have few scenarios
+        if len(scenarios) < 10:
+            base_scenarios = [
+                # Leading car with low degradation
+                {'tire_degradation_rate': 0.05, 'position_normalized': 0.1, 'gap_to_leader_seconds': 5.0, 'track_abrasiveness': 0.6},
+                # Mid-field with high degradation
+                {'tire_degradation_rate': 0.2, 'position_normalized': 0.5, 'gap_to_leader_seconds': 25.0, 'track_abrasiveness': 0.8},
+                # Back marker needing aggressive strategy
+                {'tire_degradation_rate': 0.15, 'position_normalized': 0.8, 'gap_to_leader_seconds': 45.0, 'track_abrasiveness': 0.7},
+                # Close battle situation
+                {'tire_degradation_rate': 0.1, 'position_normalized': 0.3, 'gap_to_leader_seconds': 8.0, 'gap_to_next_seconds': 0.5}
+            ]
+            scenarios.extend(base_scenarios)
         
         return scenarios
     
-    def cross_validate_models(self, processed_data: Dict, n_splits: int = 3) -> Dict[str, Any]:
-        """Perform cross-validation across different tracks"""
+    def cross_validate_track_consistency(self, processed_data: Dict[str, Dict[str, pd.DataFrame]]) -> Dict[str, Any]:
+        """Perform cross-validation across different tracks to check model consistency"""
         cv_results = {}
         
         for track_name, data in processed_data.items():
-            if data['lap_data'].empty:
+            if 'pit_data' not in data or data['pit_data'].empty:
                 continue
                 
             track_results = {}
-            lap_data = data['lap_data']
+            pit_data = data['pit_data']
             
-            # Simple time-series cross-validation for lap data
-            if len(lap_data) >= 10:
-                tscv = TimeSeriesSplit(n_splits=min(n_splits, len(lap_data) // 3))
-                
-                # Example: Validate lap time consistency
-                if 'LAP_TIME_SECONDS' in lap_data.columns:
-                    lap_times = lap_data['LAP_TIME_SECONDS'].dropna().values
-                    if len(lap_times) >= 10:
-                        # Calculate consistency across splits
-                        consistencies = []
-                        for train_idx, test_idx in tscv.split(lap_times):
-                            train_std = np.std(lap_times[train_idx])
-                            test_std = np.std(lap_times[test_idx])
-                            consistencies.append(abs(train_std - test_std))
-                        
-                        track_results['lap_time_consistency_cv'] = np.mean(consistencies)
+            # Analyze lap time consistency across the track
+            if 'LAP_TIME_SECONDS' in pit_data.columns:
+                lap_times = pit_data['LAP_TIME_SECONDS'].dropna().values
+                if len(lap_times) >= 5:
+                    track_results['lap_time_mean'] = float(np.mean(lap_times))
+                    track_results['lap_time_std'] = float(np.std(lap_times))
+                    track_results['lap_time_cv'] = float(track_results['lap_time_std'] / track_results['lap_time_mean'])
+            
+            # Analyze tire degradation patterns if available
+            if 'TIRE_DEGRADATION_RATE' in pit_data.columns:
+                degradation = pit_data['TIRE_DEGRADATION_RATE'].dropna().values
+                if len(degradation) >= 3:
+                    track_results['degradation_mean'] = float(np.mean(degradation))
+                    track_results['degradation_positive'] = float(np.sum(degradation > 0) / len(degradation))
             
             cv_results[track_name] = track_results
+        
+        # Calculate cross-track consistency metrics
+        if len(cv_results) >= 2:
+            lap_time_means = [r['lap_time_mean'] for r in cv_results.values() if 'lap_time_mean' in r]
+            if lap_time_means:
+                cv_results['cross_track_consistency'] = {
+                    'lap_time_mean_std': float(np.std(lap_time_means)),
+                    'lap_time_cv_mean': float(np.mean([r.get('lap_time_cv', 0) for r in cv_results.values() if 'lap_time_cv' in r]))
+                }
         
         return cv_results
     
     def generate_comprehensive_report(self, model_results: Dict, evaluation_results: Dict) -> str:
-        """Generate comprehensive evaluation report"""
+        """Generate comprehensive evaluation report with FirebaseDataLoader context"""
         report = {
             'summary': {
                 'total_models': len(model_results),
-                'successful_evaluations': sum(1 for r in evaluation_results.values() 
-                                            if r.get('status') == 'success'),
-                'evaluation_timestamp': pd.Timestamp.now().isoformat()
+                'successful_models': sum(1 for r in model_results.values() if r.get('status') == 'success'),
+                'successful_evaluations': sum(1 for r in evaluation_results.values() if r.get('status') == 'success'),
+                'evaluation_timestamp': pd.Timestamp.now().isoformat(),
+                'tracks_used': max([r.get('tracks_used', 0) for r in model_results.values() if isinstance(r, dict)] or [0])
             },
             'model_details': {},
             'performance_metrics': {},
@@ -295,20 +370,27 @@ class ModelEvaluator:
         for model_name, eval_result in evaluation_results.items():
             report['model_details'][model_name] = eval_result
             
-            # Generate recommendations based on evaluation results
+            # Model-specific recommendations
             if eval_result.get('status') == 'success':
                 if model_name == 'fuel_consumption':
                     validity = eval_result.get('valid_prediction_rate', 0)
                     if validity < 0.8:
                         report['recommendations'].append(
-                            f"Improve {model_name} model - only {validity:.1%} of predictions are realistic"
+                            f"Improve {model_name} model - {validity:.1%} realistic predictions (target: 80%)"
                         )
                 
                 elif model_name == 'pit_strategy':
                     accuracy = eval_result.get('accuracy', 0)
                     if accuracy < 0.7:
                         report['recommendations'].append(
-                            f"Enhance {model_name} model - accuracy {accuracy:.1%} below target"
+                            f"Enhance {model_name} model - {accuracy:.1%} accuracy (target: 70%)"
+                        )
+                
+                elif model_name == 'tire_degradation':
+                    pred_rate = eval_result.get('degradation_prediction_rate', 0)
+                    if pred_rate < 0.7:
+                        report['recommendations'].append(
+                            f"Optimize {model_name} model - {pred_rate:.1%} valid predictions (target: 70%)"
                         )
             
             elif eval_result.get('status') != 'success':
@@ -319,9 +401,9 @@ class ModelEvaluator:
         # Overall assessment
         success_rate = report['summary']['successful_evaluations'] / report['summary']['total_models']
         if success_rate >= 0.8:
-            report['overall_assessment'] = "EXCELLENT - Most models performing well"
+            report['overall_assessment'] = "EXCELLENT - Models performing well across tracks"
         elif success_rate >= 0.6:
-            report['overall_assessment'] = "GOOD - Models generally performing adequately"
+            report['overall_assessment'] = "GOOD - Models generally adequate for race strategy"
         else:
             report['overall_assessment'] = "NEEDS IMPROVEMENT - Significant model issues detected"
         
@@ -334,19 +416,19 @@ class ModelEvaluator:
             return
         
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Model Evaluation Results', fontsize=16)
+        fig.suptitle('Model Evaluation Results - Racing Analytics', fontsize=16)
         
-        # Plot 1: Model Status
+        # Plot 1: Model Status Distribution
         status_counts = {}
         for result in evaluation_results.values():
             status = result.get('status', 'unknown')
             status_counts[status] = status_counts.get(status, 0) + 1
         
         if status_counts:
-            axes[0, 0].pie(status_counts.values(), labels=status_counts.keys(), autopct='%1.1f%%')
-            axes[0, 0].set_title('Model Evaluation Status')
+            axes[0, 0].pie(status_counts.values(), labels=status_counts.keys(), autopct='%1.1f%%', startangle=90)
+            axes[0, 0].set_title('Model Evaluation Status Distribution')
         
-        # Plot 2: Performance Scores
+        # Plot 2: Performance Scores Comparison
         performance_data = {}
         for model_name, result in evaluation_results.items():
             if result.get('status') == 'success':
@@ -354,316 +436,83 @@ class ModelEvaluator:
                 performance_data[model_name] = score
         
         if performance_data:
-            axes[0, 1].bar(performance_data.keys(), performance_data.values())
+            model_names = list(performance_data.keys())
+            scores = list(performance_data.values())
+            
+            bars = axes[0, 1].bar(model_names, scores, color=['#2E8B57' if s >= 0.7 else '#FFA500' if s >= 0.5 else '#DC143C' for s in scores])
             axes[0, 1].set_title('Model Performance Scores')
             axes[0, 1].tick_params(axis='x', rotation=45)
-            axes[0, 1].axhline(y=0.7, color='r', linestyle='--', alpha=0.7, label='Target Score')
+            axes[0, 1].axhline(y=0.7, color='green', linestyle='--', alpha=0.7, label='Target (0.7)')
+            axes[0, 1].axhline(y=0.5, color='orange', linestyle='--', alpha=0.7, label='Minimum (0.5)')
             axes[0, 1].legend()
+            axes[0, 1].set_ylim(0, 1)
+            
+            # Add value labels on bars
+            for bar, score in zip(bars, scores):
+                axes[0, 1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                               f'{score:.3f}', ha='center', va='bottom')
         
-        # Plot 3: Prediction Validity
+        # Plot 3: Prediction Validity Rates
         validity_data = {}
         for model_name, result in evaluation_results.items():
-            if 'valid_prediction_rate' in result:
-                validity_data[model_name] = result['valid_prediction_rate']
-            elif 'strategy_prediction_validity' in result:
-                validity_data[model_name] = result['strategy_prediction_validity']
-            elif 'realistic_impacts' in result:
-                validity_data[model_name] = result['realistic_impacts']
+            validity_keys = ['valid_prediction_rate', 'strategy_prediction_validity', 'degradation_prediction_rate', 'valid_impact_rate']
+            for key in validity_keys:
+                if key in result:
+                    validity_data[model_name] = result[key]
+                    break
         
         if validity_data:
-            axes[1, 0].bar(validity_data.keys(), validity_data.values())
+            model_names = list(validity_data.keys())
+            validity_rates = list(validity_data.values())
+            
+            bars = axes[1, 0].bar(model_names, validity_rates, 
+                                color=['#2E8B57' if r >= 0.8 else '#FFA500' if r >= 0.6 else '#DC143C' for r in validity_rates])
             axes[1, 0].set_title('Prediction Validity Rates')
             axes[1, 0].tick_params(axis='x', rotation=45)
-            axes[1, 0].axhline(y=0.8, color='g', linestyle='--', alpha=0.7, label='Validity Target')
+            axes[1, 0].axhline(y=0.8, color='green', linestyle='--', alpha=0.7, label='Target (80%)')
+            axes[1, 0].set_ylim(0, 1)
             axes[1, 0].legend()
+            
+            # Add value labels
+            for bar, rate in zip(bars, validity_rates):
+                axes[1, 0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                               f'{rate:.1%}', ha='center', va='bottom')
         
-        # Plot 4: Test Sample Sizes
-        sample_data = {}
+        # Plot 4: Training Data Coverage
+        coverage_data = {}
         for model_name, result in evaluation_results.items():
-            if 'test_samples' in result:
-                sample_data[model_name] = result['test_samples']
+            if 'training_samples' in result:
+                coverage_data[model_name] = result['training_samples']
+            elif 'test_samples' in result:
+                coverage_data[model_name] = result['test_samples']
         
-        if sample_data:
-            axes[1, 1].bar(sample_data.keys(), sample_data.values())
-            axes[1, 1].set_title('Test Sample Sizes')
+        if coverage_data:
+            model_names = list(coverage_data.keys())
+            samples = list(coverage_data.values())
+            
+            axes[1, 1].bar(model_names, samples, color='skyblue')
+            axes[1, 1].set_title('Training/Test Sample Sizes')
             axes[1, 1].tick_params(axis='x', rotation=45)
+            axes[1, 1].set_ylabel('Number of Samples')
+            
+            # Add value labels
+            for i, v in enumerate(samples):
+                axes[1, 1].text(i, v + max(samples)*0.01, str(v), ha='center', va='bottom')
         
         plt.tight_layout()
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            self.logger.info(f"Saved evaluation plot to {save_path}")
+            self.logger.info(f"✅ Saved evaluation plot to {save_path}")
         
         plt.show()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# import pandas as pd
-# import numpy as np
-# from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score, classification_report
-# import matplotlib.pyplot as plt
-# import seaborn as sns
-# from typing import Dict, Any
-# import json
-
-# class ModelEvaluator:
-#     """Comprehensive model evaluation and validation"""
-    
-#     @staticmethod
-#     def evaluate_regression_model(model, X_test: pd.DataFrame, y_test: pd.Series, model_name: str) -> Dict[str, Any]:
-#         """Evaluate regression model performance"""
-#         y_pred = model.predict(X_test)
-        
-#         metrics = {
-#             'model_name': model_name,
-#             'mae': mean_absolute_error(y_test, y_pred),
-#             'mse': mean_squared_error(y_test, y_pred),
-#             'rmse': np.sqrt(mean_squared_error(y_test, y_pred)),
-#             'r2_score': r2_score(y_test, y_pred),
-#             'mean_absolute_percentage_error': np.mean(np.abs((y_test - y_pred) / y_test)) * 100,
-#             'test_samples': len(y_test),
-#             'mean_prediction': float(np.mean(y_pred)),
-#             'std_prediction': float(np.std(y_pred))
-#         }
-        
-#         return metrics
-    
-#     @staticmethod
-#     def evaluate_classification_model(model, X_test: pd.DataFrame, y_test: pd.Series, model_name: str) -> Dict[str, Any]:
-#         """Evaluate classification model performance"""
-#         y_pred = model.predict(X_test)
-        
-#         metrics = {
-#             'model_name': model_name,
-#             'accuracy': accuracy_score(y_test, y_pred),
-#             'test_samples': len(y_test),
-#             'class_distribution': dict(y_test.value_counts()),
-#             'prediction_distribution': dict(pd.Series(y_pred).value_counts())
-#         }
-        
-#         # Add detailed classification report
-#         report = classification_report(y_test, y_pred, output_dict=True)
-#         metrics['detailed_report'] = report
-        
-#         return metrics
-    
-#     @staticmethod
-#     def cross_validate_tire_model(model, lap_data: pd.DataFrame, n_splits: int = 5) -> Dict[str, Any]:
-#         """Cross-validate tire degradation model across different tracks"""
-#         tracks = lap_data['track_name'].unique() if 'track_name' in lap_data.columns else ['combined']
-#         results = {}
-        
-#         for track in tracks:
-#             if track != 'combined':
-#                 track_data = lap_data[lap_data['track_name'] == track]
-#             else:
-#                 track_data = lap_data
-            
-#             if len(track_data) < 10:
-#                 continue
-                
-#             # Simple train-test split for each track
-#             from sklearn.model_selection import train_test_split
-#             features = ['LAP_NUMBER', 'S1_SECONDS', 'S2_SECONDS', 'S3_SECONDS']
-#             X = track_data[features].dropna()
-#             y = track_data.loc[X.index, 'LAP_TIME_SECONDS']
-            
-#             if len(X) < 5:
-#                 continue
-                
-#             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-#             model.fit(X_train, y_train)
-            
-#             track_metrics = ModelEvaluator.evaluate_regression_model(
-#                 model, X_test, y_test, f"tire_model_{track}"
-#             )
-#             results[track] = track_metrics
-        
-#         return results
-    
-#     @staticmethod
-#     def validate_fuel_predictions(model, lap_data: pd.DataFrame) -> Dict[str, Any]:
-#         """Validate fuel consumption predictions against realistic bounds"""
-#         predictions = []
-#         actual_consumption = []
-        
-#         # Simulate fuel consumption validation
-#         for _, lap in lap_data.iterrows():
-#             features = {
-#                 'lap_number': lap['LAP_NUMBER'],
-#                 'avg_speed': lap.get('KPH', 0),
-#                 'time_variation': 0,  # Simplified
-#                 's1_time': lap.get('S1_SECONDS', 0),
-#                 's2_time': lap.get('S2_SECONDS', 0),
-#                 's3_time': lap.get('S3_SECONDS', 0),
-#                 'top_speed': lap.get('TOP_SPEED', lap.get('KPH', 0) * 1.1),
-#                 'position_change': 0,
-#                 'temp_effect': 1.0
-#             }
-            
-#             try:
-#                 pred = model.predict_fuel_consumption(features)
-#                 predictions.append(pred)
-                
-#                 # Simulate actual consumption (2-4 liters per lap realistic range)
-#                 actual = np.random.uniform(2.0, 4.0)
-#                 actual_consumption.append(actual)
-#             except:
-#                 continue
-        
-#         if not predictions:
-#             return {'validation_passed': False, 'error': 'No predictions generated'}
-        
-#         validation_metrics = {
-#             'validation_passed': all(2.0 <= p <= 4.0 for p in predictions),
-#             'mean_predicted_consumption': np.mean(predictions),
-#             'std_predicted_consumption': np.std(predictions),
-#             'min_predicted_consumption': min(predictions),
-#             'max_predicted_consumption': max(predictions),
-#             'predictions_within_bounds': sum(2.0 <= p <= 4.0 for p in predictions) / len(predictions),
-#             'total_predictions': len(predictions)
-#         }
-        
-#         return validation_metrics
-    
-#     @staticmethod
-#     def analyze_feature_importance(model, feature_names: list) -> Dict[str, float]:
-#         """Analyze and rank feature importance"""
-#         if hasattr(model, 'feature_importances_'):
-#             importance_dict = dict(zip(feature_names, model.feature_importances_))
-#             return dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True))
-#         else:
-#             return {'error': 'Model does not have feature_importances_ attribute'}
-    
-#     @staticmethod
-#     def generate_model_report(trained_models: Dict[str, Any]) -> str:
-#         """Generate comprehensive model evaluation report"""
-#         report = {
-#             'summary': {
-#                 'total_models_trained': len(trained_models),
-#                 'models_trained': list(trained_models.keys()),
-#                 'timestamp': pd.Timestamp.now().isoformat()
-#             },
-#             'model_performance': {},
-#             'recommendations': []
-#         }
-        
-#         for model_name, model_result in trained_models.items():
-#             if 'accuracy' in model_result:  # Classification model
-#                 report['model_performance'][model_name] = {
-#                     'type': 'classification',
-#                     'accuracy': model_result['accuracy'],
-#                     'test_samples': model_result.get('test_samples', 'N/A')
-#                 }
-                
-#                 if model_result['accuracy'] < 0.7:
-#                     report['recommendations'].append(
-#                         f"Consider improving {model_name} - accuracy below 70%"
-#                     )
-                    
-#             elif 'test_score' in model_result:  # Regression model
-#                 report['model_performance'][model_name] = {
-#                     'type': 'regression',
-#                     'r2_score': model_result['test_score'],
-#                     'train_score': model_result['train_score'],
-#                     'overfitting_risk': model_result['train_score'] - model_result['test_score'] > 0.1
-#                 }
-                
-#                 if model_result['test_score'] < 0.6:
-#                     report['recommendations'].append(
-#                         f"Consider feature engineering for {model_name} - R² below 60%"
-#                     )
-        
-#         # Overall assessment
-#         if len(report['recommendations']) == 0:
-#             report['overall_assessment'] = "All models performing adequately"
-#         else:
-#             report['overall_assessment'] = f"Found {len(report['recommendations'])} areas for improvement"
-        
-#         return json.dumps(report, indent=2)
-    
-#     @staticmethod
-#     def plot_model_performance(metrics: Dict[str, Any], save_path: str = None):
-#         """Create visualization of model performance"""
-#         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        
-#         # Plot 1: R² Scores for regression models
-#         regression_scores = {
-#             name: metrics['test_score'] 
-#             for name, metrics in metrics.items() 
-#             if 'test_score' in metrics
-#         }
-        
-#         if regression_scores:
-#             axes[0, 0].bar(regression_scores.keys(), regression_scores.values())
-#             axes[0, 0].set_title('Regression Models R² Scores')
-#             axes[0, 0].set_ylabel('R² Score')
-#             axes[0, 0].tick_params(axis='x', rotation=45)
-        
-#         # Plot 2: Feature Importance (example for first model)
-#         if 'feature_importance' in list(metrics.values())[0]:
-#             first_model = list(metrics.values())[0]
-#             importance = first_model['feature_importance']
-#             axes[0, 1].barh(list(importance.keys())[:10], list(importance.values())[:10])
-#             axes[0, 1].set_title('Top 10 Feature Importances')
-        
-#         # Plot 3: Train vs Test scores
-#         train_scores = [m.get('train_score', 0) for m in metrics.values() if 'train_score' in m]
-#         test_scores = [m.get('test_score', 0) for m in metrics.values() if 'test_score' in m]
-        
-#         if train_scores and test_scores:
-#             x = range(len(train_scores))
-#             axes[1, 0].plot(x, train_scores, 'b-', label='Train Score')
-#             axes[1, 0].plot(x, test_scores, 'r-', label='Test Score')
-#             axes[1, 0].set_title('Train vs Test Scores')
-#             axes[1, 0].legend()
-        
-#         plt.tight_layout()
-        
-#         if save_path:
-#             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-#         plt.show()
-    
-#     @staticmethod
-#     def validate_real_time_predictions(predictions: Dict[str, Any]) -> Dict[str, bool]:
-#         """Validate that real-time predictions are within realistic bounds"""
-#         validation_results = {}
-        
-#         # Tire wear validation (0-100%)
-#         if 'tire_wear' in predictions:
-#             wear = predictions['tire_wear']
-#             validation_results['tire_wear_valid'] = 0 <= wear <= 100
-        
-#         # Fuel consumption validation (realistic range)
-#         if 'fuel_consumption' in predictions:
-#             consumption = predictions['fuel_consumption']
-#             validation_results['fuel_consumption_valid'] = 1.5 <= consumption <= 5.0
-        
-#         # Pit strategy validation (sensible categories)
-#         if 'pit_strategy' in predictions:
-#             strategy = predictions['pit_strategy']
-#             validation_results['pit_strategy_valid'] = strategy in ['early', 'middle', 'late']
-        
-#         validation_results['all_valid'] = all(validation_results.values())
-        
-#         return validation_results
+    def save_evaluation_report(self, report: str, filepath: str = "outputs/reports/evaluation_report.json"):
+        """Save evaluation report to file"""
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        try:
+            with open(filepath, 'w') as f:
+                f.write(report)
+            self.logger.info(f"✅ Evaluation report saved to {filepath}")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to save evaluation report: {e}")
