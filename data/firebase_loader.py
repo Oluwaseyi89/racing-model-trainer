@@ -22,8 +22,36 @@ class FirebaseDataLoader:
         
         # Define EXACT schemas based on your data structures
         self.schemas = {
+            # 'pit_data': {
+            #     'required_cols': ['NUMBER', 'DRIVER_NUMBER', 'LAP_NUMBER', 'LAP_TIME'],
+            #     'dtype_mapping': {
+            #         'NUMBER': 'int64', 'DRIVER_NUMBER': 'int64', 'LAP_NUMBER': 'int64',
+            #         'LAP_TIME': 'str', 'LAP_IMPROVEMENT': 'float64', 
+            #         'CROSSING_FINISH_LINE_IN_PIT': 'str', 'S1': 'str', 'S1_IMPROVEMENT': 'float64',
+            #         'S2': 'str', 'S2_IMPROVEMENT': 'float64', 'S3': 'str', 'S3_IMPROVEMENT': 'float64',
+            #         'KPH': 'float64', 'ELAPSED': 'str', 'HOUR': 'str', 'S1_LARGE': 'str',
+            #         'S2_LARGE': 'str', 'S3_LARGE': 'str', 'TOP_SPEED': 'float64', 'PIT_TIME': 'str',
+            #         'CLASS': 'str', 'GROUP': 'str', 'MANUFACTURER': 'str', 'FLAG_AT_FL': 'str',
+            #         'S1_SECONDS': 'float64', 'S2_SECONDS': 'float64', 'S3_SECONDS': 'float64',
+            #         'IM1a_time': 'str', 'IM1a_elapsed': 'str', 'IM1_time': 'str', 'IM1_elapsed': 'str',
+            #         'IM2a_time': 'str', 'IM2a_elapsed': 'str', 'IM2_time': 'str', 'IM2_elapsed': 'str',
+            #         'IM3a_time': 'str', 'IM3a_elapsed': 'str', 'FL_time': 'str', 'FL_elapsed': 'str'
+            #     },
+            #     'default_values': {
+            #         'DRIVER_NUMBER': 0,  # CRITICAL FIX: Added default for DRIVER_NUMBER
+            #         'LAP_IMPROVEMENT': 0.0, 'S1_IMPROVEMENT': 0.0, 'S2_IMPROVEMENT': 0.0, 
+            #         'S3_IMPROVEMENT': 0.0, 'KPH': 0.0, 'TOP_SPEED': 0.0, 'S1_SECONDS': 0.0,
+            #         'S2_SECONDS': 0.0, 'S3_SECONDS': 0.0, 'CROSSING_FINISH_LINE_IN_PIT': '',
+            #         'CLASS': '', 'GROUP': '', 'MANUFACTURER': '', 'FLAG_AT_FL': '',
+            #         'IM1a_time': '', 'IM1a_elapsed': '', 'IM1_time': '', 'IM1_elapsed': '',
+            #         'IM2a_time': '', 'IM2a_elapsed': '', 'IM2_time': '', 'IM2_elapsed': '',
+            #         'IM3a_time': '', 'IM3a_elapsed': '', 'FL_time': '', 'FL_elapsed': '',
+            #         'S1': '', 'S2': '', 'S3': '', 'ELAPSED': '', 'HOUR': '', 'S1_LARGE': '',
+            #         'S2_LARGE': '', 'S3_LARGE': '', 'PIT_TIME': ''
+            #     }
+            # },
             'pit_data': {
-                'required_cols': ['NUMBER', 'DRIVER_NUMBER', 'LAP_NUMBER', 'LAP_TIME'],
+                'required_cols': ['NUMBER', 'LAP_NUMBER', 'LAP_TIME'],  # REMOVED DRIVER_NUMBER from required
                 'dtype_mapping': {
                     'NUMBER': 'int64', 'DRIVER_NUMBER': 'int64', 'LAP_NUMBER': 'int64',
                     'LAP_TIME': 'str', 'LAP_IMPROVEMENT': 'float64', 
@@ -38,7 +66,7 @@ class FirebaseDataLoader:
                     'IM3a_time': 'str', 'IM3a_elapsed': 'str', 'FL_time': 'str', 'FL_elapsed': 'str'
                 },
                 'default_values': {
-                    'DRIVER_NUMBER': 0,  # CRITICAL FIX: Added default for DRIVER_NUMBER
+                    'DRIVER_NUMBER': 0,  # KEPT default for DRIVER_NUMBER
                     'LAP_IMPROVEMENT': 0.0, 'S1_IMPROVEMENT': 0.0, 'S2_IMPROVEMENT': 0.0, 
                     'S3_IMPROVEMENT': 0.0, 'KPH': 0.0, 'TOP_SPEED': 0.0, 'S1_SECONDS': 0.0,
                     'S2_SECONDS': 0.0, 'S3_SECONDS': 0.0, 'CROSSING_FINISH_LINE_IN_PIT': '',
