@@ -278,26 +278,7 @@ class FirebaseDataLoader:
             'weather_data': pd.DataFrame()
         }
 
-    # def list_available_tracks(self) -> List[str]:
-    #     """List all available tracks in dataset_files folder"""
-    #     tracks = set()
-    #     try:
-    #         blobs = self.bucket.list_blobs(prefix="dataset_files/")
-    #         for blob in blobs:
-    #             if blob.name.endswith('.csv'):
-    #                 # Extract track name from filename (e.g., "dataset_files/barber_pit_data.csv" -> "barber")
-    #                 filename = os.path.basename(blob.name)
-    #                 track_name = filename.split('_')[0]  # Get part before first underscore
-    #                 if track_name:
-    #                     tracks.add(track_name)
-            
-    #         print(f"📦 Found {len(tracks)} tracks: {sorted(list(tracks))}")
-    #         return sorted(list(tracks))
-            
-    #     except Exception as e:
-    #         print(f"❌ Failed to list tracks: {e}")
-    #         return []
-
+   
     def list_available_tracks(self) -> List[str]:
         """List all available tracks in dataset_files folder"""
         tracks = set()
