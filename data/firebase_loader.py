@@ -151,6 +151,37 @@ class FirebaseDataLoader:
         
         return df_clean
 
+    # def _load_csv_with_schema(self, file_content: bytes, data_type: str, filename: str) -> pd.DataFrame:
+    #     """Load CSV file with EXACT schema enforcement"""
+    #     try:
+    #         # Determine separator based on data type
+    #         sep = ';' if data_type in ['pit_data', 'race_data', 'weather_data'] else ','
+            
+    #         try:
+    #             df = pd.read_csv(io.BytesIO(file_content), sep=sep, low_memory=False)
+    #             if len(df.columns) > 1 and len(df) > 0:
+    #                 print(f"✅ Loaded {filename} (sep: {sep})")
+    #                 return self._enforce_schema(df, data_type)
+    #         except Exception as e:
+    #             print(f"⚠️ Failed with sep {sep}, trying alternatives: {e}")
+    #             # Try other separators as fallback
+    #             for alt_sep in [',', '\t', ';']:
+    #                 if alt_sep != sep:
+    #                     try:
+    #                         df = pd.read_csv(io.BytesIO(file_content), sep=alt_sep, low_memory=False)
+    #                         if len(df.columns) > 1 and len(df) > 0:
+    #                             print(f"✅ Loaded {filename} (sep: {alt_sep})")
+    #                             return self._enforce_schema(df, data_type)
+    #                     except:
+    #                         continue
+            
+    #         print(f"❌ Could not load {filename} with any separator")
+    #         return pd.DataFrame()
+            
+    #     except Exception as e:
+    #         print(f"⚠️ Failed to load {filename}: {e}")
+    #         return pd.DataFrame()
+
     def _load_csv_with_schema(self, file_content: bytes, data_type: str, filename: str) -> pd.DataFrame:
         """Load CSV file with EXACT schema enforcement"""
         try:
@@ -158,10 +189,40 @@ class FirebaseDataLoader:
             sep = ';' if data_type in ['pit_data', 'race_data', 'weather_data'] else ','
             
             try:
+                # First try normal loading
                 df = pd.read_csv(io.BytesIO(file_content), sep=sep, low_memory=False)
+                
+                # Check if we have malformed headers (only 1 column but should have multiple)
+                if len(df.columns) == 1 and sep == ';':
+                    print(f"⚠️ Detected malformed semicolon header in {filename}, attempting repair...")
+                    
+                    # Read the file as raw text to manually parse headers
+                    file_text = file_content.decode('utf-8')
+                    lines = file_text.split('\n')
+                    
+                    if lines:
+                        # Split first line on semicolon and clean up headers
+                        raw_headers = lines[0].split(';')
+                        cleaned_headers = [header.strip() for header in raw_headers]
+                        
+                        # Read data without header
+                        df = pd.read_csv(io.BytesIO(file_content), sep=sep, header=0, skiprows=1, low_memory=False)
+                        
+                        # Assign cleaned headers
+                        if len(cleaned_headers) == len(df.columns):
+                            df.columns = cleaned_headers
+                            print(f"✅ Repaired header for {filename}")
+                        else:
+                            # If header count doesn't match, use the first row as data and create generic headers
+                            df_with_header = pd.read_csv(io.BytesIO(file_content), sep=sep, header=None, low_memory=False)
+                            df = df_with_header.iloc[1:]  # Skip first row (the malformed header)
+                            df.columns = [f'col_{i}' for i in range(len(df.columns))]
+                            print(f"⚠️ Created generic headers for {filename}")
+                
                 if len(df.columns) > 1 and len(df) > 0:
                     print(f"✅ Loaded {filename} (sep: {sep})")
                     return self._enforce_schema(df, data_type)
+                    
             except Exception as e:
                 print(f"⚠️ Failed with sep {sep}, trying alternatives: {e}")
                 # Try other separators as fallback
