@@ -14,7 +14,8 @@ setup(
         "kaggle",
         "google-cloud-storage", 
         "pydantic-settings",
-        "pydantic"
+        "pydantic",
+        "chardet"
     ],
     python_requires=">=3.8",
 )
